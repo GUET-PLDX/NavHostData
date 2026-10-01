@@ -8,6 +8,7 @@ trap 'rm -f "$binary"' EXIT
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror \
   -I"$script_dir/../../../Middlewares/Third_Party/LibXR/src/core" \
+  -I"$script_dir/../../../Middlewares/Third_Party/LibXR/src/core/assert" \
   "$script_dir/nav_host_data_test.cpp" -o "$binary"
 "$binary"
 

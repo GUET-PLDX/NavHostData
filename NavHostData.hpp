@@ -26,6 +26,7 @@ depends:
 
 #include "libxr_def.hpp"
 #include "libxr_mem.hpp"
+#include "libxr_time.hpp"
 
 namespace Pldx::NavHostData {
 
@@ -260,9 +261,10 @@ struct Status {
   bool armed_fresh = false;
 };
 
-inline bool IsFresh(const Status& status, uint32_t now_ms) {
+inline bool IsFresh(const Status& status, LibXR::MillisecondTimestamp now) {
   return status.accepted_seen && status.armed_fresh &&
-         now_ms - status.accepted_time_ms <= FRESHNESS_TIMEOUT_MS;
+         (now - LibXR::MillisecondTimestamp(status.accepted_time_ms))
+                 .ToMillisecond() <= FRESHNESS_TIMEOUT_MS;
 }
 
 }  // namespace Pldx::HostChassisSession
@@ -276,12 +278,13 @@ inline constexpr uint32_t AUTO_CHASSIS_MODE_ROTOR = 2U;
 inline constexpr uint32_t AUTO_CHASSIS_MODE_NAVIGATION = 4U;
 inline constexpr uint32_t FEEDBACK_OMEGA_TIMEOUT_MS = 50U;
 
-inline bool AngularVelocityFresh(uint32_t now_ms, uint32_t yaw_ms,
-                                 uint32_t pitch_ms, bool yaw_seen,
-                                 bool pitch_seen) {
+inline bool AngularVelocityFresh(LibXR::MillisecondTimestamp now,
+                                 LibXR::MillisecondTimestamp yaw_time,
+                                 LibXR::MillisecondTimestamp pitch_time,
+                                 bool yaw_seen, bool pitch_seen) {
   return yaw_seen && pitch_seen &&
-         now_ms - yaw_ms <= FEEDBACK_OMEGA_TIMEOUT_MS &&
-         now_ms - pitch_ms <= FEEDBACK_OMEGA_TIMEOUT_MS;
+         (now - yaw_time).ToMillisecond() <= FEEDBACK_OMEGA_TIMEOUT_MS &&
+         (now - pitch_time).ToMillisecond() <= FEEDBACK_OMEGA_TIMEOUT_MS;
 }
 
 inline float YawRadToCamerainitDeg(float yaw_rad) {
@@ -327,38 +330,39 @@ inline bool ChassisCommandValid(const NavHostData::ChassisTarget& command) {
 
 class ChassisCommandTracker {
  public:
-  bool Observe(const NavHostData::ChassisTarget& command, uint32_t now_ms) {
-    Expire(now_ms);
+  bool Observe(const NavHostData::ChassisTarget& command,
+               LibXR::MillisecondTimestamp now) {
+    Expire(now);
     command_seen_ = true;
     schema_ok_ = true;
     finite_ = ChassisCommandValid(command);
     if (!finite_) return Reject();
-    Accept(now_ms);
+    Accept(now);
     return true;
   }
 
-  bool CommandFresh(uint32_t now_ms) {
-    Expire(now_ms);
+  bool CommandFresh(LibXR::MillisecondTimestamp now) {
+    Expire(now);
     return armed_ && accepted_command_seen_;
   }
-  uint32_t StatusFlags(uint32_t now_ms) {
+  uint32_t StatusFlags(LibXR::MillisecondTimestamp now) {
     uint32_t flags = 1U;
     if (command_seen_) flags |= 1U << 1U;
-    if (CommandFresh(now_ms)) flags |= 1U << 2U;
+    if (CommandFresh(now)) flags |= 1U << 2U;
     if (schema_ok_) flags |= 1U << 3U;
     if (finite_) flags |= 1U << 4U;
     return flags;
   }
-  uint32_t CommandAge(uint32_t now_ms) const {
-    return accepted_command_seen_ ? now_ms - last_command_ms_
+  uint32_t CommandAge(LibXR::MillisecondTimestamp now) const {
+    return accepted_command_seen_ ? (now - last_command_time_).ToMillisecond()
                                   : std::numeric_limits<uint32_t>::max();
   }
   uint32_t LastSequence() const { return accepted_count_; }
   uint32_t RejectedCount() const { return rejected_count_; }
 
  private:
-  void Accept(uint32_t now_ms) {
-    last_command_ms_ = now_ms;
+  void Accept(LibXR::MillisecondTimestamp now) {
+    last_command_time_ = now;
     accepted_command_seen_ = true;
     armed_ = true;
     ++accepted_count_;
@@ -367,12 +371,13 @@ class ChassisCommandTracker {
     ++rejected_count_;
     return false;
   }
-  void Expire(uint32_t now_ms) {
-    if (armed_ && now_ms - last_command_ms_ >= COMMAND_TIMEOUT_MS) {
+  void Expire(LibXR::MillisecondTimestamp now) {
+    if (armed_ &&
+        (now - last_command_time_).ToMillisecond() >= COMMAND_TIMEOUT_MS) {
       armed_ = false;
     }
   }
-  uint32_t last_command_ms_{};
+  LibXR::MillisecondTimestamp last_command_time_{};
   uint32_t rejected_count_{}, accepted_count_{};
   bool command_seen_{}, accepted_command_seen_{}, schema_ok_{}, finite_{};
   bool armed_{};
@@ -541,8 +546,8 @@ class NavHostData : public LibXR::Application {
   void OnMonitor() override {}
 
  private:
-  static uint32_t Now() {
-    return static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+  static LibXR::MillisecondTimestamp Now() {
+    return LibXR::Timebase::GetMilliseconds();
   }
   template <typename Data, void (NavHostData::*Method)(const Data&)>
   void RegisterCallback(LibXR::Topic& topic) {
@@ -595,7 +600,7 @@ class NavHostData : public LibXR::Application {
   }
   void OnChassis(const Pldx::NavHostData::ChassisTarget& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
-    const uint32_t NOW = Now();
+    const auto NOW = Now();
     if (tracker_.Observe(value, NOW)) {
       latest_chassis_ = value;
     }
@@ -726,9 +731,9 @@ class NavHostData : public LibXR::Application {
     PublishGimbalFeedback();
   }
   void PublishGimbalFeedback() {
-    const uint32_t NOW_MS = Now();
+    const auto NOW = Now();
     if (Pldx::NavHostDataDetail::AngularVelocityFresh(
-            NOW_MS, yaw_omega_time_, pitch_omega_time_, yaw_omega_seen_,
+            NOW, yaw_omega_time_, pitch_omega_time_, yaw_omega_seen_,
             pitch_omega_seen_) &&
         std::isfinite(gimbal_feedback_.yaw_velocity) &&
         std::isfinite(gimbal_feedback_.pitch_velocity)) {
@@ -760,7 +765,7 @@ class NavHostData : public LibXR::Application {
         chassis_imu_yaw_valid_);
     offline_info_topic_.Publish(info);
   }
-  CMD::Data BuildAI(uint32_t now) {
+  CMD::Data BuildAI(LibXR::MillisecondTimestamp now) {
     CMD::Data value{};
     value.ctrl_source = CMD::ControlSource::CTRL_SOURCE_AI;
     if (tracker_.CommandFresh(now)) {
@@ -771,7 +776,7 @@ class NavHostData : public LibXR::Application {
       value.chassis_online = true;
     }
     if (visual_gimbal_seen_ &&
-        now - visual_gimbal_time_ <=
+        (now - visual_gimbal_time_).ToMillisecond() <=
             Pldx::NavHostDataDetail::VISUAL_SOURCE_TIMEOUT_MS) {
       value.gimbal.yaw = visual_gimbal_.yaw;
       value.gimbal.pit = visual_gimbal_.pit;
@@ -782,17 +787,22 @@ class NavHostData : public LibXR::Application {
       value.gimbal_online = true;
     }
     if (visual_fire_seen_ &&
-        now - visual_fire_time_ <=
+        (now - visual_fire_time_).ToMillisecond() <=
             Pldx::NavHostDataDetail::VISUAL_SOURCE_TIMEOUT_MS)
       value.launcher.isfire = visual_fire_.isfire;
     return value;
   }
   void OnReferee(const Referee::RobotGameRefereePack& source) {
-    const uint32_t now = Now();
-    const bool hp_fresh = source.robot_hp_received_time_ms != 0U &&
-                          now - source.robot_hp_received_time_ms <= 250U;
-    const bool pos_fresh = source.sentry_pos_received_time_ms != 0U &&
-                           now - source.sentry_pos_received_time_ms <= 250U;
+    // Referee publishes raw uint32_t receive times; 0 means never received.
+    const auto NOW = Now();
+    const bool hp_fresh =
+        source.robot_hp_received_time_ms != 0U &&
+        (NOW - LibXR::MillisecondTimestamp(source.robot_hp_received_time_ms))
+                .ToMillisecond() <= 250U;
+    const bool pos_fresh =
+        source.sentry_pos_received_time_ms != 0U &&
+        (NOW - LibXR::MillisecondTimestamp(source.sentry_pos_received_time_ms))
+                .ToMillisecond() <= 250U;
     Pldx::NavHostData::GameInfo game{};
     game.game_time_remaining = source.game_status.stage_remain_time;
     game.coin_remaining = source.bullet_remain.coin_remain;
@@ -895,11 +905,11 @@ class NavHostData : public LibXR::Application {
   Pldx::NavHostData::ChassisTarget latest_chassis_{};
   Pldx::NavHostDataDetail::HostGimbalTarget visual_gimbal_{};
   Pldx::NavHostDataDetail::HostFireNotify visual_fire_{};
-  uint32_t visual_gimbal_time_{}, visual_fire_time_{};
+  LibXR::MillisecondTimestamp visual_gimbal_time_{}, visual_fire_time_{};
   bool visual_gimbal_seen_{}, visual_fire_seen_{};
   float yawmotor_angle_{};
-  uint32_t yaw_omega_time_{};
-  uint32_t pitch_omega_time_{};
+  LibXR::MillisecondTimestamp yaw_omega_time_{};
+  LibXR::MillisecondTimestamp pitch_omega_time_{};
   bool yaw_omega_seen_{};
   bool pitch_omega_seen_{};
   float chassis_imu_yaw_{};
