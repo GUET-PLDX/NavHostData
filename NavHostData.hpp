@@ -32,6 +32,8 @@ namespace Pldx::NavHostData {
 
 inline constexpr char CHASSIS_TARGET_TOPIC[] = "nav_data";
 inline constexpr char DECISION_COMMAND_TOPIC[] = "behavior_data";
+inline constexpr char TARGET_EULER_TOPIC[] = "target_euler";
+inline constexpr char FIRE_NOTIFY_TOPIC[] = "fire_notify";
 inline constexpr char TEAM_INFO_TOPIC[] = "team_info";
 inline constexpr char GAME_INFO_TOPIC[] = "game_info";
 inline constexpr char ONLINE_INFO_TOPIC[] = "online_info";
@@ -308,6 +310,21 @@ struct HostFireNotify {
   bool isfire{};
 };
 
+static_assert(sizeof(HostGimbalTarget) == 36U);
+static_assert(sizeof(HostFireNotify) == 1U);
+static_assert(offsetof(HostGimbalTarget, rol) == 0U);
+static_assert(offsetof(HostGimbalTarget, pit) == 4U);
+static_assert(offsetof(HostGimbalTarget, yaw) == 8U);
+static_assert(offsetof(HostGimbalTarget, rol_dot) == 12U);
+static_assert(offsetof(HostGimbalTarget, pit_dot) == 16U);
+static_assert(offsetof(HostGimbalTarget, yaw_dot) == 20U);
+static_assert(offsetof(HostGimbalTarget, rol_ddot) == 24U);
+static_assert(offsetof(HostGimbalTarget, pit_ddot) == 28U);
+static_assert(offsetof(HostGimbalTarget, yaw_ddot) == 32U);
+static_assert(offsetof(HostFireNotify, isfire) == 0U);
+static_assert(std::is_trivially_copyable_v<HostGimbalTarget>);
+static_assert(std::is_trivially_copyable_v<HostFireNotify>);
+
 inline bool IsTunnelYawAligned(float chassis_yaw_rad, bool align_active,
                                float target_yaw_rad, bool yaw_valid) {
   if (!align_active || !yaw_valid || !std::isfinite(chassis_yaw_rad) ||
@@ -517,9 +534,11 @@ class NavHostData : public LibXR::Application {
     RegisterNamedCallback<Referee::RobotGameRefereePack,
                           &NavHostData::OnReferee>(referee_topic_name);
     RegisterNamedCallback<Pldx::NavHostDataDetail::HostGimbalTarget,
-                          &NavHostData::OnVisualGimbal>("target_euler");
+                          &NavHostData::OnVisualGimbal>(
+        Pldx::NavHostData::TARGET_EULER_TOPIC);
     RegisterNamedCallback<Pldx::NavHostDataDetail::HostFireNotify,
-                          &NavHostData::OnVisualFire>("fire_notify");
+                          &NavHostData::OnVisualFire>(
+        Pldx::NavHostData::FIRE_NOTIFY_TOPIC);
     RegisterNamedCallback<Pldx::NavHostData::GimbalFeedbackV1,
                           &NavHostData::OnLauncherFeedback>(
         Pldx::NavHostData::LAUNCHER_FEEDBACK_TOPIC);

@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <iostream>
 #include <string_view>
+#include <type_traits>
 
 #include "NavHostData.hpp"
 
@@ -8,6 +9,8 @@ using namespace Pldx::NavHostData;
 
 static_assert(std::string_view(CHASSIS_TARGET_TOPIC) == "nav_data");
 static_assert(std::string_view(DECISION_COMMAND_TOPIC) == "behavior_data");
+static_assert(std::string_view(TARGET_EULER_TOPIC) == "target_euler");
+static_assert(std::string_view(FIRE_NOTIFY_TOPIC) == "fire_notify");
 static_assert(std::string_view(TEAM_INFO_TOPIC) == "team_info");
 static_assert(std::string_view(GIMBAL_FEEDBACK_TOPIC) == "nav_gimbal_feedback");
 static_assert(sizeof(ChassisTarget) == 45U);
@@ -32,6 +35,20 @@ static_assert(offsetof(SentryInfoOffline, transform_state) == 6U);
 static_assert(offsetof(SentryInfoOffline, capacitor_capacity) == 10U);
 static_assert(offsetof(SentryInfoOffline, chassis_imu_yaw) == 11U);
 static_assert(offsetof(SentryInfoOffline, tunnel_yaw_aligned) == 15U);
+static_assert(sizeof(Pldx::NavHostDataDetail::HostGimbalTarget) == 36U);
+static_assert(sizeof(Pldx::NavHostDataDetail::HostFireNotify) == 1U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostGimbalTarget, rol) == 0U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostGimbalTarget, pit) == 4U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostGimbalTarget, yaw) == 8U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostGimbalTarget, rol_dot) == 12U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostGimbalTarget, pit_dot) == 16U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostGimbalTarget, yaw_dot) == 20U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostGimbalTarget, rol_ddot) == 24U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostGimbalTarget, pit_ddot) == 28U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostGimbalTarget, yaw_ddot) == 32U);
+static_assert(offsetof(Pldx::NavHostDataDetail::HostFireNotify, isfire) == 0U);
+static_assert(std::is_trivially_copyable_v<Pldx::NavHostDataDetail::HostGimbalTarget>);
+static_assert(std::is_trivially_copyable_v<Pldx::NavHostDataDetail::HostFireNotify>);
 
 int main() {
   std::cout << sizeof(ChassisTarget) << ',' << sizeof(BehaviorData) << ','

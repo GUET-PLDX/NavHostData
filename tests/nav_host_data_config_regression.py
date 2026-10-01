@@ -41,6 +41,8 @@ def main():
     assert nav_rx["constructor_args"]["topic_configs"] == [
         "nav_data",
         "behavior_data",
+        "target_euler",
+        "fire_notify",
     ]
 
     nav_tx = module_by_id(modules, "nav_tx_shared_topic_client")
