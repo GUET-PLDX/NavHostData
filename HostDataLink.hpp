@@ -28,7 +28,7 @@ depends:
 #include "libxr_mem.hpp"
 #include "libxr_time.hpp"
 
-namespace Pldx::NavHostData {
+namespace Pldx::HostDataLink {
 
 inline constexpr char CHASSIS_TARGET_TOPIC[] = "nav_data";
 inline constexpr char DECISION_COMMAND_TOPIC[] = "behavior_data";
@@ -57,7 +57,7 @@ inline constexpr uint8_t GIMBAL_BULLET_COUNT_VALID =
 inline constexpr uint8_t GIMBAL_MODE_VALID = FEEDBACK_GIMBAL_MODE_VALID;
 inline constexpr uint8_t GIMBAL_SHOOT_MODE_VALID = FEEDBACK_VISION_TASK_VALID;
 
-// Compact launcher sample consumed by NavHostData before publishing the
+// Compact launcher sample consumed by HostDataLink before publishing the
 // aggregate 28-byte GimbalFeedback payload.
 struct [[gnu::packed]] GimbalFeedbackV1 {
   float bullet_speed_mps{};
@@ -249,7 +249,7 @@ static_assert(std::is_trivially_copyable_v<SentryInfoOnline>);
 static_assert(std::is_trivially_copyable_v<SentryInfoOffline>);
 static_assert(std::is_trivially_copyable_v<RadarInfo>);
 
-}  // namespace Pldx::NavHostData
+}  // namespace Pldx::HostDataLink
 
 namespace Pldx::HostChassisSession {
 
@@ -271,7 +271,7 @@ inline bool IsFresh(const Status& status, LibXR::MillisecondTimestamp now) {
 
 }  // namespace Pldx::HostChassisSession
 
-namespace Pldx::NavHostDataDetail {
+namespace Pldx::HostDataLinkDetail {
 
 inline constexpr uint32_t COMMAND_TIMEOUT_MS = 150U;
 inline constexpr uint32_t VISUAL_SOURCE_TIMEOUT_MS = 250U;
@@ -336,7 +336,7 @@ inline bool IsTunnelYawAligned(float chassis_yaw_rad, bool align_active,
   return std::fabs(error) <= CHASSIS_YAW_ALIGNMENT_TOLERANCE_RAD;
 }
 
-inline bool ChassisCommandValid(const NavHostData::ChassisTarget& command) {
+inline bool ChassisCommandValid(const HostDataLink::ChassisTarget& command) {
   return std::isfinite(command.vx_mps) && std::isfinite(command.vy_mps) &&
          std::isfinite(command.vw_rad_s) &&
          std::isfinite(command.current_yaw) &&
@@ -347,7 +347,7 @@ inline bool ChassisCommandValid(const NavHostData::ChassisTarget& command) {
 
 class ChassisCommandTracker {
  public:
-  bool Observe(const NavHostData::ChassisTarget& command,
+  bool Observe(const HostDataLink::ChassisTarget& command,
                LibXR::MillisecondTimestamp now) {
     Expire(now);
     command_seen_ = true;
@@ -414,7 +414,7 @@ struct DecisionPublication {
 
 class DecisionSequenceTracker {
  public:
-  DecisionPublication Decode(const NavHostData::BehaviorData& value,
+  DecisionPublication Decode(const HostDataLink::BehaviorData& value,
                              bool ready = true) {
     DecisionPublication result;
     if (!ready || !std::isfinite(value.scan_yaw_min_rad) ||
@@ -482,7 +482,7 @@ bool DispatchDecision(const DecisionPublication& value, Sink& sink) {
   return true;
 }
 
-}  // namespace Pldx::NavHostDataDetail
+}  // namespace Pldx::HostDataLinkDetail
 
 #if __has_include("app_framework.hpp")
 #include "CMD.hpp"
@@ -493,69 +493,73 @@ bool DispatchDecision(const DecisionPublication& value, Sink& sink) {
 #include "timebase.hpp"
 #include "uart.hpp"
 
-class NavHostData : public LibXR::Application {
+class HostDataLink : public LibXR::Application {
  public:
-  NavHostData(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-              CMD& cmd, const char* uart_name, const char* referee_topic_name,
-              const char* pitch_topic_name, const char* yaw_topic_name,
-              const char* quaternion_topic_name)
+  HostDataLink(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
+               CMD& cmd, const char* uart_name, const char* referee_topic_name,
+               const char* pitch_topic_name, const char* yaw_topic_name,
+               const char* quaternion_topic_name)
       : cmd_(&cmd),
         uart_(hw.template FindOrExit<LibXR::UART>({uart_name})),
         chassis_topic_(
-            LibXR::Topic::CreateTopic<Pldx::NavHostData::ChassisTarget>(
+            LibXR::Topic::CreateTopic<Pldx::HostDataLink::ChassisTarget>(
                 "nav_data")),
         behavior_topic_(
-            LibXR::Topic::CreateTopic<Pldx::NavHostData::BehaviorData>(
+            LibXR::Topic::CreateTopic<Pldx::HostDataLink::BehaviorData>(
                 "behavior_data")),
-        team_info_topic_(LibXR::Topic::CreateTopic<Pldx::NavHostData::TeamInfo>(
-            "team_info")),
-        game_info_topic_(LibXR::Topic::CreateTopic<Pldx::NavHostData::GameInfo>(
-            "game_info")),
+        team_info_topic_(
+            LibXR::Topic::CreateTopic<Pldx::HostDataLink::TeamInfo>(
+                "team_info")),
+        game_info_topic_(
+            LibXR::Topic::CreateTopic<Pldx::HostDataLink::GameInfo>(
+                "game_info")),
         online_info_topic_(
-            LibXR::Topic::CreateTopic<Pldx::NavHostData::SentryInfoOnline>(
+            LibXR::Topic::CreateTopic<Pldx::HostDataLink::SentryInfoOnline>(
                 "online_info")),
         offline_info_topic_(
-            LibXR::Topic::CreateTopic<Pldx::NavHostData::SentryInfoOffline>(
+            LibXR::Topic::CreateTopic<Pldx::HostDataLink::SentryInfoOffline>(
                 "offline_info")),
         radar_info_topic_(
-            LibXR::Topic::CreateTopic<Pldx::NavHostData::RadarInfo>(
+            LibXR::Topic::CreateTopic<Pldx::HostDataLink::RadarInfo>(
                 "radar_info")),
         gimbal_feedback_topic_(
-            LibXR::Topic::CreateTopic<Pldx::NavHostData::GimbalFeedback>(
-                Pldx::NavHostData::GIMBAL_FEEDBACK_TOPIC)),
+            LibXR::Topic::CreateTopic<Pldx::HostDataLink::GimbalFeedback>(
+                Pldx::HostDataLink::GIMBAL_FEEDBACK_TOPIC)),
         nav_chassis_mode_topic_(LibXR::Topic::CreateTopic<uint32_t>(
             "nav_chassis_mode", nullptr, false)),
         use_capacitor_topic_(
             LibXR::Topic::CreateTopic<bool>("use_capacitor", nullptr, false)) {
     ASSERT(uart_->SetConfig({921600U, LibXR::UART::Parity::NO_PARITY, 8U,
                              1U}) == LibXR::ErrorCode::OK);
-    RegisterRawCallback<&NavHostData::OnChassis>(chassis_topic_);
-    RegisterRawCallback<&NavHostData::OnBehavior>(behavior_topic_);
+    RegisterRawCallback<&HostDataLink::OnChassis>(chassis_topic_);
+    RegisterRawCallback<&HostDataLink::OnBehavior>(behavior_topic_);
     RegisterNamedCallback<Referee::RobotGameRefereePack,
-                          &NavHostData::OnReferee>(referee_topic_name);
-    RegisterNamedCallback<Pldx::NavHostDataDetail::HostGimbalTarget,
-                          &NavHostData::OnVisualGimbal>(
-        Pldx::NavHostData::TARGET_EULER_TOPIC);
-    RegisterNamedCallback<Pldx::NavHostDataDetail::HostFireNotify,
-                          &NavHostData::OnVisualFire>(
-        Pldx::NavHostData::FIRE_NOTIFY_TOPIC);
-    RegisterNamedCallback<Pldx::NavHostData::GimbalFeedbackV1,
-                          &NavHostData::OnLauncherFeedback>(
-        Pldx::NavHostData::LAUNCHER_FEEDBACK_TOPIC);
-    RegisterNamedCallback<float, &NavHostData::OnGimbalYaw>(yaw_topic_name);
-    RegisterNamedCallback<float, &NavHostData::OnGimbalPitch>(pitch_topic_name);
-    RegisterNamedCallback<float, &NavHostData::OnGimbalYawOmega>(
+                          &HostDataLink::OnReferee>(referee_topic_name);
+    RegisterNamedCallback<Pldx::HostDataLinkDetail::HostGimbalTarget,
+                          &HostDataLink::OnVisualGimbal>(
+        Pldx::HostDataLink::TARGET_EULER_TOPIC);
+    RegisterNamedCallback<Pldx::HostDataLinkDetail::HostFireNotify,
+                          &HostDataLink::OnVisualFire>(
+        Pldx::HostDataLink::FIRE_NOTIFY_TOPIC);
+    RegisterNamedCallback<Pldx::HostDataLink::GimbalFeedbackV1,
+                          &HostDataLink::OnLauncherFeedback>(
+        Pldx::HostDataLink::LAUNCHER_FEEDBACK_TOPIC);
+    RegisterNamedCallback<float, &HostDataLink::OnGimbalYaw>(yaw_topic_name);
+    RegisterNamedCallback<float, &HostDataLink::OnGimbalPitch>(
+        pitch_topic_name);
+    RegisterNamedCallback<float, &HostDataLink::OnGimbalYawOmega>(
         "yawmotor_omega");
-    RegisterNamedCallback<float, &NavHostData::OnGimbalPitchOmega>(
+    RegisterNamedCallback<float, &HostDataLink::OnGimbalPitchOmega>(
         "pitchmotor_omega");
-    RegisterNamedCallback<uint8_t, &NavHostData::OnGimbalMode>("gimbal_mode");
-    RegisterNamedCallback<uint8_t, &NavHostData::OnVisionTask>("vision_task");
-    RegisterNamedCallback<float, &NavHostData::OnChassisYaw>("chassis_imu_yaw");
-    RegisterNamedCallback<bool, &NavHostData::OnChassisYawValid>(
+    RegisterNamedCallback<uint8_t, &HostDataLink::OnGimbalMode>("gimbal_mode");
+    RegisterNamedCallback<uint8_t, &HostDataLink::OnVisionTask>("vision_task");
+    RegisterNamedCallback<float, &HostDataLink::OnChassisYaw>(
+        "chassis_imu_yaw");
+    RegisterNamedCallback<bool, &HostDataLink::OnChassisYawValid>(
         "chassis_imu_yaw_valid");
-    RegisterNamedCallback<uint8_t, &NavHostData::OnCapacitorCapacity>(
+    RegisterNamedCallback<uint8_t, &HostDataLink::OnCapacitorCapacity>(
         "chassis_capacitor_capacity");
-    RegisterNamedCallback<bool, &NavHostData::OnCapacitorValid>(
+    RegisterNamedCallback<bool, &HostDataLink::OnCapacitorValid>(
         "chassis_capacitor_valid");
     UNUSED(pitch_topic_name);
     UNUSED(yaw_topic_name);
@@ -568,56 +572,57 @@ class NavHostData : public LibXR::Application {
   static LibXR::MillisecondTimestamp Now() {
     return LibXR::Timebase::GetMilliseconds();
   }
-  template <typename Data, void (NavHostData::*Method)(const Data&)>
+  template <typename Data, void (HostDataLink::*Method)(const Data&)>
   void RegisterCallback(LibXR::Topic& topic) {
     auto cb = LibXR::Topic::Callback::Create(
-        [](bool, NavHostData* self, const Data& data) {
+        [](bool, HostDataLink* self, const Data& data) {
           (self->*Method)(data);
         },
         this);
     topic.RegisterCallback(cb);
   }
   template <
-      void (NavHostData::*Method)(const Pldx::NavHostData::ChassisTarget&)>
+      void (HostDataLink::*Method)(const Pldx::HostDataLink::ChassisTarget&)>
   void RegisterRawCallback(LibXR::Topic& topic) {
     auto cb = LibXR::Topic::Callback::Create(
-        [](bool, NavHostData* self,
+        [](bool, HostDataLink* self,
            const LibXR::Topic::RawMessageView& message) {
           if (message.timestamp == 0U || message.payload.addr_ == nullptr ||
               message.payload.size_ !=
-                  sizeof(Pldx::NavHostData::ChassisTarget)) {
+                  sizeof(Pldx::HostDataLink::ChassisTarget)) {
             return;
           }
-          Pldx::NavHostData::ChassisTarget value{};
+          Pldx::HostDataLink::ChassisTarget value{};
           LibXR::Memory::FastCopy(&value, message.payload.addr_, sizeof(value));
           (self->*Method)(value);
         },
         this);
     topic.RegisterCallback(cb);
   }
-  template <void (NavHostData::*Method)(const Pldx::NavHostData::BehaviorData&)>
+  template <
+      void (HostDataLink::*Method)(const Pldx::HostDataLink::BehaviorData&)>
   void RegisterRawCallback(LibXR::Topic& topic) {
     auto cb = LibXR::Topic::Callback::Create(
-        [](bool, NavHostData* self,
+        [](bool, HostDataLink* self,
            const LibXR::Topic::RawMessageView& message) {
           if (message.timestamp == 0U || message.payload.addr_ == nullptr ||
               message.payload.size_ !=
-                  sizeof(Pldx::NavHostData::BehaviorData)) {
+                  sizeof(Pldx::HostDataLink::BehaviorData)) {
             return;
           }
-          Pldx::NavHostData::BehaviorData value{};
+          Pldx::HostDataLink::BehaviorData value{};
           LibXR::Memory::FastCopy(&value, message.payload.addr_, sizeof(value));
           (self->*Method)(value);
         },
         this);
     topic.RegisterCallback(cb);
   }
-  template <typename Data, void (NavHostData::*Method)(const Data&)>
+  template <typename Data, void (HostDataLink::*Method)(const Data&)>
   void RegisterNamedCallback(const char* name) {
     LibXR::Topic topic(LibXR::Topic::FindOrCreate<Data>(name));
     RegisterCallback<Data, Method>(topic);
   }
-  void OnChassis(const Pldx::NavHostData::ChassisTarget& value) {
+  void OnChassis(const Pldx::HostDataLink::ChassisTarget& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
     const auto NOW = Now();
     if (tracker_.Observe(value, NOW)) {
@@ -625,11 +630,11 @@ class NavHostData : public LibXR::Application {
     }
     cmd_->FeedAI(BuildAI(NOW));
   }
-  void OnBehavior(const Pldx::NavHostData::BehaviorData& value) {
-    Pldx::NavHostDataDetail::DecisionPublication publication;
+  void OnBehavior(const Pldx::HostDataLink::BehaviorData& value) {
+    Pldx::HostDataLinkDetail::DecisionPublication publication;
     bool publish_chassis_mode = false;
     uint32_t chassis_mode =
-        Pldx::NavHostDataDetail::AUTO_CHASSIS_MODE_NAVIGATION;
+        Pldx::HostDataLinkDetail::AUTO_CHASSIS_MODE_NAVIGATION;
     {
       LibXR::Mutex::LockGuard lock(mutex_);
       tunnel_align_active_ = value.tunnel_align_active;
@@ -639,8 +644,8 @@ class NavHostData : public LibXR::Application {
       publish_chassis_mode = cmd_->GetCtrlMode() == CMD::Mode::CMD_AUTO_CTRL;
       chassis_mode =
           value.use_gyro_mode
-              ? Pldx::NavHostDataDetail::AUTO_CHASSIS_MODE_ROTOR
-              : Pldx::NavHostDataDetail::AUTO_CHASSIS_MODE_NAVIGATION;
+              ? Pldx::HostDataLinkDetail::AUTO_CHASSIS_MODE_ROTOR
+              : Pldx::HostDataLinkDetail::AUTO_CHASSIS_MODE_NAVIGATION;
     }
     bool use_capacitor = value.use_capacitor;
     use_capacitor_topic_.Publish(use_capacitor);
@@ -648,32 +653,32 @@ class NavHostData : public LibXR::Application {
       nav_chassis_mode_topic_.Publish(chassis_mode);
     }
     Sink sink(*this);
-    Pldx::NavHostDataDetail::DispatchDecision(publication, sink);
+    Pldx::HostDataLinkDetail::DispatchDecision(publication, sink);
   }
-  void OnVisualGimbal(const Pldx::NavHostDataDetail::HostGimbalTarget& value) {
+  void OnVisualGimbal(const Pldx::HostDataLinkDetail::HostGimbalTarget& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
     visual_gimbal_ = value;
     visual_gimbal_time_ = Now();
     visual_gimbal_seen_ = true;
     cmd_->FeedAI(BuildAI(visual_gimbal_time_));
   }
-  void OnVisualFire(const Pldx::NavHostDataDetail::HostFireNotify& value) {
+  void OnVisualFire(const Pldx::HostDataLinkDetail::HostFireNotify& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
     visual_fire_ = value;
     visual_fire_time_ = Now();
     visual_fire_seen_ = true;
     cmd_->FeedAI(BuildAI(visual_fire_time_));
   }
-  void OnLauncherFeedback(const Pldx::NavHostData::GimbalFeedbackV1& value) {
+  void OnLauncherFeedback(const Pldx::HostDataLink::GimbalFeedbackV1& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
     if ((value.valid_flags &
-         static_cast<uint8_t>(~Pldx::NavHostData::FEEDBACK_VALID_MASK)) != 0U)
+         static_cast<uint8_t>(~Pldx::HostDataLink::FEEDBACK_VALID_MASK)) != 0U)
       return;
     gimbal_feedback_.bullet_speed = value.bullet_speed_mps;
     gimbal_feedback_.bullet_count = value.bullet_count;
     constexpr uint8_t kLauncherFlags =
-        Pldx::NavHostData::FEEDBACK_BULLET_SPEED_VALID |
-        Pldx::NavHostData::FEEDBACK_BULLET_COUNT_VALID;
+        Pldx::HostDataLink::FEEDBACK_BULLET_SPEED_VALID |
+        Pldx::HostDataLink::FEEDBACK_BULLET_COUNT_VALID;
     gimbal_feedback_.valid_flags =
         static_cast<uint8_t>((gimbal_feedback_.valid_flags & ~kLauncherFlags) |
                              (value.valid_flags & kLauncherFlags));
@@ -708,7 +713,7 @@ class NavHostData : public LibXR::Application {
     if (!std::isfinite(value)) return;
     yawmotor_angle_ = value;
     gimbal_feedback_.yaw = value;
-    gimbal_feedback_.valid_flags |= Pldx::NavHostData::FEEDBACK_YAW_VALID;
+    gimbal_feedback_.valid_flags |= Pldx::HostDataLink::FEEDBACK_YAW_VALID;
     PublishGimbalFeedback();
     PublishOffline();
   }
@@ -716,7 +721,7 @@ class NavHostData : public LibXR::Application {
     LibXR::Mutex::LockGuard lock(mutex_);
     if (!std::isfinite(value)) return;
     gimbal_feedback_.pitch = value;
-    gimbal_feedback_.valid_flags |= Pldx::NavHostData::FEEDBACK_PITCH_VALID;
+    gimbal_feedback_.valid_flags |= Pldx::HostDataLink::FEEDBACK_PITCH_VALID;
     PublishGimbalFeedback();
   }
   void OnGimbalYawOmega(const float& value) {
@@ -739,37 +744,37 @@ class NavHostData : public LibXR::Application {
     LibXR::Mutex::LockGuard lock(mutex_);
     gimbal_feedback_.gimbal_mode = value;
     gimbal_feedback_.valid_flags |=
-        Pldx::NavHostData::FEEDBACK_GIMBAL_MODE_VALID;
+        Pldx::HostDataLink::FEEDBACK_GIMBAL_MODE_VALID;
     PublishGimbalFeedback();
   }
   void OnVisionTask(const uint8_t& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
     gimbal_feedback_.vision_task = value;
     gimbal_feedback_.valid_flags |=
-        Pldx::NavHostData::FEEDBACK_VISION_TASK_VALID;
+        Pldx::HostDataLink::FEEDBACK_VISION_TASK_VALID;
     PublishGimbalFeedback();
   }
   void PublishGimbalFeedback() {
     const auto NOW = Now();
-    if (Pldx::NavHostDataDetail::AngularVelocityFresh(
+    if (Pldx::HostDataLinkDetail::AngularVelocityFresh(
             NOW, yaw_omega_time_, pitch_omega_time_, yaw_omega_seen_,
             pitch_omega_seen_) &&
         std::isfinite(gimbal_feedback_.yaw_velocity) &&
         std::isfinite(gimbal_feedback_.pitch_velocity)) {
       gimbal_feedback_.valid_flags |=
-          Pldx::NavHostData::FEEDBACK_ANGULAR_VELOCITY_VALID;
+          Pldx::HostDataLink::FEEDBACK_ANGULAR_VELOCITY_VALID;
     } else {
       gimbal_feedback_.valid_flags = static_cast<uint8_t>(
           gimbal_feedback_.valid_flags &
           static_cast<uint8_t>(
-              ~Pldx::NavHostData::FEEDBACK_ANGULAR_VELOCITY_VALID));
+              ~Pldx::HostDataLink::FEEDBACK_ANGULAR_VELOCITY_VALID));
     }
     gimbal_feedback_topic_.Publish(gimbal_feedback_);
   }
   void PublishOffline() {
-    Pldx::NavHostData::SentryInfoOffline info{};
+    Pldx::HostDataLink::SentryInfoOffline info{};
     info.yaw_camerainit_to_gimbal =
-        Pldx::NavHostDataDetail::YawRadToCamerainitDeg(yawmotor_angle_);
+        Pldx::HostDataLinkDetail::YawRadToCamerainitDeg(yawmotor_angle_);
     info.lifter_current_pos = 0U;
     info.is_transformable = false;
     info.transform_state = 0.0F;
@@ -779,7 +784,7 @@ class NavHostData : public LibXR::Application {
     // 255 is the ABI-preserving unknown sentinel; 0..100 are percent.
     info.capacitor_capacity =
         capacitor_capacity_valid_ ? capacitor_capacity_ : 255U;
-    info.tunnel_yaw_aligned = Pldx::NavHostDataDetail::IsTunnelYawAligned(
+    info.tunnel_yaw_aligned = Pldx::HostDataLinkDetail::IsTunnelYawAligned(
         chassis_imu_yaw_, tunnel_align_active_, tunnel_align_angle_rad_,
         chassis_imu_yaw_valid_);
     offline_info_topic_.Publish(info);
@@ -796,7 +801,7 @@ class NavHostData : public LibXR::Application {
     }
     if (visual_gimbal_seen_ &&
         (now - visual_gimbal_time_).ToMillisecond() <=
-            Pldx::NavHostDataDetail::VISUAL_SOURCE_TIMEOUT_MS) {
+            Pldx::HostDataLinkDetail::VISUAL_SOURCE_TIMEOUT_MS) {
       value.gimbal.yaw = visual_gimbal_.yaw;
       value.gimbal.pit = visual_gimbal_.pit;
       value.gimbal.yaw_dot = visual_gimbal_.yaw_dot;
@@ -807,7 +812,7 @@ class NavHostData : public LibXR::Application {
     }
     if (visual_fire_seen_ &&
         (now - visual_fire_time_).ToMillisecond() <=
-            Pldx::NavHostDataDetail::VISUAL_SOURCE_TIMEOUT_MS)
+            Pldx::HostDataLinkDetail::VISUAL_SOURCE_TIMEOUT_MS)
       value.launcher.isfire = visual_fire_.isfire;
     return value;
   }
@@ -822,7 +827,7 @@ class NavHostData : public LibXR::Application {
         source.sentry_pos_received_time_ms != 0U &&
         (NOW - LibXR::MillisecondTimestamp(source.sentry_pos_received_time_ms))
                 .ToMillisecond() <= 250U;
-    Pldx::NavHostData::GameInfo game{};
+    Pldx::HostDataLink::GameInfo game{};
     game.game_time_remaining = source.game_status.stage_remain_time;
     game.coin_remaining = source.bullet_remain.coin_remain;
     game.game_status = static_cast<uint8_t>(source.game_status.game_progress);
@@ -832,7 +837,7 @@ class NavHostData : public LibXR::Application {
     game.enemy_base_hp = source.robot_hp.enemy_base_hp;
     game_info_topic_.Publish(game);
 
-    Pldx::NavHostData::SentryInfoOnline online{};
+    Pldx::HostDataLink::SentryInfoOnline online{};
     online.self_health = source.robot_status.remain_hp;
     online.bullets_remaining = source.bullet_remain.bullet_17_remain;
     online.cooling_value = source.robot_status.shooter_cooling_value;
@@ -863,7 +868,7 @@ class NavHostData : public LibXR::Application {
     if ((source.source_valid_mask & Referee::SOURCE_ROBOT_HP) != 0U &&
         (source.source_valid_mask & Referee::SOURCE_SENTRY_POS) != 0U &&
         hp_fresh && pos_fresh && ids_valid) {
-      Pldx::NavHostData::TeamInfo info{};
+      Pldx::HostDataLink::TeamInfo info{};
       const uint8_t ids[4] = {static_cast<uint8_t>(blue ? 101U : 1U),
                               static_cast<uint8_t>(blue ? 102U : 2U),
                               static_cast<uint8_t>(blue ? 103U : 3U),
@@ -883,13 +888,13 @@ class NavHostData : public LibXR::Application {
       team_info_topic_.Publish(info);
     }
 
-    Pldx::NavHostData::RadarInfo radar{};
+    Pldx::HostDataLink::RadarInfo radar{};
     radar.enemy_coin_left = source.bullet_remain.coin_remain;
     radar_info_topic_.Publish(radar);
   }
   class Sink {
    public:
-    explicit Sink(NavHostData& owner) : owner_(owner) {}
+    explicit Sink(HostDataLink& owner) : owner_(owner) {}
     void PublishBuyBulletNum(uint16_t v) {
       owner_.buy_bullet_topic_.Publish(v);
     }
@@ -904,7 +909,7 @@ class NavHostData : public LibXR::Application {
     }
 
    private:
-    NavHostData& owner_;
+    HostDataLink& owner_;
   };
   CMD* cmd_;
   LibXR::UART* uart_;
@@ -921,9 +926,9 @@ class NavHostData : public LibXR::Application {
       LibXR::Topic::CreateTopic<uint8_t>("sentry_remote_buy_hp_times")};
   LibXR::Topic resurrection_topic_{
       LibXR::Topic::CreateTopic<bool>("sentry_buy_resurrection")};
-  Pldx::NavHostData::ChassisTarget latest_chassis_{};
-  Pldx::NavHostDataDetail::HostGimbalTarget visual_gimbal_{};
-  Pldx::NavHostDataDetail::HostFireNotify visual_fire_{};
+  Pldx::HostDataLink::ChassisTarget latest_chassis_{};
+  Pldx::HostDataLinkDetail::HostGimbalTarget visual_gimbal_{};
+  Pldx::HostDataLinkDetail::HostFireNotify visual_fire_{};
   LibXR::MillisecondTimestamp visual_gimbal_time_{}, visual_fire_time_{};
   bool visual_gimbal_seen_{}, visual_fire_seen_{};
   float yawmotor_angle_{};
@@ -937,8 +942,8 @@ class NavHostData : public LibXR::Application {
   bool capacitor_capacity_valid_{};
   bool tunnel_align_active_{};
   float tunnel_align_angle_rad_{};
-  Pldx::NavHostData::GimbalFeedback gimbal_feedback_{};
-  Pldx::NavHostDataDetail::ChassisCommandTracker tracker_;
-  Pldx::NavHostDataDetail::DecisionSequenceTracker decision_;
+  Pldx::HostDataLink::GimbalFeedback gimbal_feedback_{};
+  Pldx::HostDataLinkDetail::ChassisCommandTracker tracker_;
+  Pldx::HostDataLinkDetail::DecisionSequenceTracker decision_;
 };
 #endif

@@ -9,7 +9,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 GIMBAL_CONFIG = ROOT / "User/RobotConfig/sentry_gimbal.yaml"
 MODULES_CONFIG = ROOT / "Modules/modules.yaml"
-NAV_HOST_DATA_HEADER = ROOT / "Modules/NavHostData/NavHostData.hpp"
+NAV_HOST_DATA_HEADER = ROOT / "Modules/HostDataLink/HostDataLink.hpp"
 
 
 def module_by_id(modules, module_id):
@@ -24,14 +24,14 @@ def main():
 
     assert all(module.get("name") != "WsProtocol" for module in modules)
 
-    allowed_uart_owners = {"NavHostData", "SharedTopic", "SharedTopicClient"}
+    allowed_uart_owners = {"HostDataLink", "SharedTopic", "SharedTopicClient"}
     for module in modules:
         args = module.get("constructor_args", {})
         if "usb_otg_hs_navigation_cdc" in str(args):
             assert module["name"] in allowed_uart_owners, module
 
-    nav_link = module_by_id(modules, "nav_host_data")
-    assert nav_link["name"] == "NavHostData"
+    nav_link = module_by_id(modules, "host_data_link")
+    assert nav_link["name"] == "HostDataLink"
     assert nav_link["constructor_args"]["cmd"] == "@cmd"
     assert nav_link["constructor_args"]["uart_name"] == "usb_otg_hs_navigation_cdc"
 
@@ -57,7 +57,7 @@ def main():
         "radar_info",
     ]
 
-    # 视觉共享主题模块已移除；视觉目标/开火改由 NavHostData 命名主题直接订阅。
+    # 视觉共享主题模块已移除；视觉目标/开火改由 HostDataLink 命名主题直接订阅。
     assert all(module.get("id") != "vision_shared_topic" for module in modules)
     assert all(
         module.get("id") != "vision_shared_topic_client" for module in modules
@@ -71,7 +71,7 @@ def main():
 
     registry = yaml.safe_load(MODULES_CONFIG.read_text(encoding="utf-8"))["modules"]
     assert "pldx/WsProtocol" not in registry
-    assert "pldx/NavHostData" in registry
+    assert "pldx/HostDataLink" in registry
     assert "pldx/NavLinkProtocol" not in registry
     assert "pldx/NavHostLink" not in registry
 

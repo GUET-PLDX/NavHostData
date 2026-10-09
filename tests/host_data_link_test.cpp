@@ -2,19 +2,19 @@
 #include <cmath>
 #include <limits>
 
-#include "../NavHostData.hpp"
+#include "../HostDataLink.hpp"
 
-using Pldx::NavHostData::BehaviorData;
-using Pldx::NavHostData::ChassisTarget;
-using Pldx::NavHostDataDetail::AngularVelocityFresh;
-using Pldx::NavHostDataDetail::AUTO_CHASSIS_MODE_NAVIGATION;
-using Pldx::NavHostDataDetail::AUTO_CHASSIS_MODE_ROTOR;
-using Pldx::NavHostDataDetail::ChassisCommandTracker;
-using Pldx::NavHostDataDetail::ChassisCommandValid;
-using Pldx::NavHostDataDetail::DecisionSequenceTracker;
-using Pldx::NavHostDataDetail::FEEDBACK_OMEGA_TIMEOUT_MS;
-using Pldx::NavHostDataDetail::IsTunnelYawAligned;
-using Pldx::NavHostDataDetail::YawRadToCamerainitDeg;
+using Pldx::HostDataLink::BehaviorData;
+using Pldx::HostDataLink::ChassisTarget;
+using Pldx::HostDataLinkDetail::AngularVelocityFresh;
+using Pldx::HostDataLinkDetail::AUTO_CHASSIS_MODE_NAVIGATION;
+using Pldx::HostDataLinkDetail::AUTO_CHASSIS_MODE_ROTOR;
+using Pldx::HostDataLinkDetail::ChassisCommandTracker;
+using Pldx::HostDataLinkDetail::ChassisCommandValid;
+using Pldx::HostDataLinkDetail::DecisionSequenceTracker;
+using Pldx::HostDataLinkDetail::FEEDBACK_OMEGA_TIMEOUT_MS;
+using Pldx::HostDataLinkDetail::IsTunnelYawAligned;
+using Pldx::HostDataLinkDetail::YawRadToCamerainitDeg;
 
 void ChassisWatchdogAndImmediateRecovery() {
   ChassisCommandTracker tracker;

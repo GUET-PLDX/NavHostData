@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-HEADER = Path(__file__).resolve().parents[1] / "NavHostData.hpp"
+HEADER = Path(__file__).resolve().parents[1] / "HostDataLink.hpp"
 
 
 def main():
