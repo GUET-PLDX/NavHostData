@@ -595,7 +595,6 @@ class HostDataLink {
     LibXR::Timer::Add(command_timer_);
     LibXR::Timer::Start(command_timer_);
   }
-  void OnMonitor() {}
 
  private:
   static LibXR::MillisecondTimestamp Now() {
