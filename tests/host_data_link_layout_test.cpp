@@ -3,7 +3,8 @@
 #include <string_view>
 #include <type_traits>
 
-#include "HostDataLink.hpp"
+#define HOST_DATA_LINK_PROTOCOL_ONLY
+#include "../HostDataLink.hpp"
 
 using namespace Pldx::HostDataLink;
 
