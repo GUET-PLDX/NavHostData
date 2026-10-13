@@ -8,8 +8,8 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 
 g++ -std=c++20 -Wall -Wextra -Werror \
   -I"$MODULE_DIR" \
-  -I"$MODULE_DIR/../../Middlewares/Third_Party/LibXR/src/core" \
-  -I"$MODULE_DIR/../../Middlewares/Third_Party/LibXR/src/core/assert" \
+  -I"$MODULE_DIR/../../.tooling/LibXR-v2.0.1/src/core" \
+  -I"$MODULE_DIR/../../.tooling/LibXR-v2.0.1/src/core/assert" \
   "$SCRIPT_DIR/host_data_link_layout_test.cpp" \
   -o "$BUILD_DIR/host_data_link_layout_test"
 

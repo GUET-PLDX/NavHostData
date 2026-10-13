@@ -3,17 +3,9 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: ROS2_LIBXR navigation link protocol and host endpoint
-constructor_args:
-  - cmd: '@cmd'
-  - uart_name: "usb_otg_hs_navigation_cdc"
-  - referee_topic_name: "sentry_ref"
-  - pitch_topic_name: "pitchmotor_angle"
-  - yaw_topic_name: "yawmotor_angle"
-  - quaternion_topic_name: "ahrs_quaternion"
-required_hardware: uart_name
 depends:
-  - pldx/CMD
-  - pldx/Referee
+- id: GUET-PLDX/CMD
+- id: GUET-PLDX/Referee
 === END MANIFEST === */
 // clang-format on
 
@@ -484,23 +476,22 @@ bool DispatchDecision(const DecisionPublication& value, Sink& sink) {
 
 }  // namespace Pldx::HostDataLinkDetail
 
-#if __has_include("app_framework.hpp")
+#if __has_include("libxr.hpp")
 #include "CMD.hpp"
 #include "Referee.hpp"
-#include "app_framework.hpp"
+#include "libxr.hpp"
 #include "message.hpp"
 #include "mutex.hpp"
 #include "timebase.hpp"
 #include "uart.hpp"
 
-class HostDataLink : public LibXR::Application {
+class HostDataLink {
  public:
-  HostDataLink(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-               CMD& cmd, const char* uart_name, const char* referee_topic_name,
+  HostDataLink(CMD& cmd, LibXR::UART& uart, const char* referee_topic_name,
                const char* pitch_topic_name, const char* yaw_topic_name,
                const char* quaternion_topic_name)
       : cmd_(&cmd),
-        uart_(hw.template FindOrExit<LibXR::UART>({uart_name})),
+        uart_((&uart)),
         chassis_topic_(
             LibXR::Topic::CreateTopic<Pldx::HostDataLink::ChassisTarget>(
                 "nav_data")),
@@ -564,9 +555,7 @@ class HostDataLink : public LibXR::Application {
     UNUSED(pitch_topic_name);
     UNUSED(yaw_topic_name);
     UNUSED(quaternion_topic_name);
-    app.Register(*this);
   }
-  void OnMonitor() override {}
 
  private:
   static LibXR::MillisecondTimestamp Now() {
