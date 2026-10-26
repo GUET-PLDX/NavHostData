@@ -2,6 +2,7 @@
 #include <cmath>
 #include <limits>
 
+#define HOST_DATA_LINK_PROTOCOL_ONLY
 #include "../HostDataLink.hpp"
 
 using Pldx::HostDataLink::BehaviorData;
