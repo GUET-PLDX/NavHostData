@@ -98,16 +98,16 @@ inline constexpr uint16_t REQUIRED_REFEREE_SOURCE_MASK =
 // ROS2_LIBXR wire payloads. Field order and one-byte packing are part of the
 // external contract; do not reorder or substitute integer widths.
 struct [[gnu::packed]] ChassisTarget {
-  float vx_mps{};           /* target velocity, m/s */
-  float vy_mps{};           /* target velocity, m/s */
-  float vw_rad_s{};         /* target yaw rate, rad/s */
-  float current_yaw{};      /* navigation yaw feedback, rad */
-  float current_vx{};       /* measured velocity, m/s */
-  float current_vy{};       /* measured velocity, m/s */
-  float current_vw{};       /* measured yaw rate, rad/s */
-  float fx_global{};        /* global-frame force, N */
-  float fy_global{};        /* global-frame force, N */
-  float fw_global{};        /* global-frame yaw torque, N*m */
+  float vx_mps{};      /* target velocity, m/s */
+  float vy_mps{};      /* target velocity, m/s */
+  float vw_rad_s{};    /* target yaw rate, rad/s */
+  float current_yaw{}; /* navigation yaw feedback, rad */
+  float current_vx{};  /* measured velocity, m/s */
+  float current_vy{};  /* measured velocity, m/s */
+  float current_vw{};  /* measured yaw rate, rad/s */
+  float fx_global{};   /* drive-force feedforward, N; same frame as vx_mps */
+  float fy_global{};   /* drive-force feedforward, N; same frame as vy_mps */
+  float fw_global{};   /* yaw-torque feedforward, N*m */
   bool use_speed_control{}; /* true: speed path, false: direct force */
   float delta_yaw{};        /* navigation/IMU yaw delta, rad */
 };
@@ -362,6 +362,22 @@ inline bool ChassisCommandValid(const HostDataLink::ChassisTarget& command) {
          std::isfinite(command.current_vw) && std::isfinite(command.delta_yaw);
 }
 
+/* 驱动力前馈的合理性上限：超过即视为错误数据丢弃（底盘侧另有实际限幅）。 */
+inline constexpr float CHASSIS_FEEDFORWARD_SANITY_LIMIT = 1000.0F;
+
+inline bool ChassisFeedforwardValid(
+    const HostDataLink::ChassisTarget& command) {
+  const float VALUES[3] = {command.fx_global, command.fy_global,
+                           command.fw_global};
+  for (float value : VALUES) {
+    if (!std::isfinite(value) ||
+        std::fabs(value) > CHASSIS_FEEDFORWARD_SANITY_LIMIT) {
+      return false;
+    }
+  }
+  return true;
+}
+
 class ChassisCommandTracker {
  public:
   bool Observe(const HostDataLink::ChassisTarget& command,
@@ -548,7 +564,9 @@ class HostDataLink {
         nav_chassis_mode_topic_(LibXR::Topic::CreateTopic<uint32_t>(
             "nav_chassis_mode", nullptr, false)),
         use_capacitor_topic_(
-            LibXR::Topic::CreateTopic<bool>("use_capacitor", nullptr, false)) {
+            LibXR::Topic::CreateTopic<bool>("use_capacitor", nullptr, false)),
+        chassis_ff_topic_(LibXR::Topic::CreateTopic<CMD::NavigationFeedforward>(
+            "chassis_ff", nullptr, false)) {
     ASSERT(uart_->SetConfig({921600U, LibXR::UART::Parity::NO_PARITY, 8U,
                              1U}) == LibXR::ErrorCode::OK);
     RegisterRawCallback<&HostDataLink::OnChassis>(chassis_topic_);
@@ -588,8 +606,14 @@ class HostDataLink {
     // when the host sends no more frames. Reuse LibXR's software timer.
     command_timer_ = LibXR::Timer::CreateTask(
         +[](HostDataLink* self) {
-          LibXR::Mutex::LockGuard lock(self->mutex_);
-          self->cmd_->FeedAI(self->BuildAI(Now()));
+          CMD::NavigationFeedforward feedforward{};
+          {
+            LibXR::Mutex::LockGuard lock(self->mutex_);
+            const auto NOW = Now();
+            self->cmd_->FeedAI(self->BuildAI(NOW));
+            feedforward = self->BuildFeedforward(NOW);
+          }
+          self->chassis_ff_topic_.Publish(feedforward);
         },
         this, 5);
     LibXR::Timer::Add(command_timer_);
@@ -826,6 +850,19 @@ class HostDataLink {
         chassis_imu_yaw_valid_);
     offline_info_topic_.Publish(info);
   }
+  /* 与 BuildAI 的速度同源、同新鲜度：命令过期或前馈非法时发布无效（零）前馈。
+   */
+  CMD::NavigationFeedforward BuildFeedforward(LibXR::MillisecondTimestamp now) {
+    CMD::NavigationFeedforward value{};
+    if (tracker_.CommandFresh(now) &&
+        Pldx::HostDataLinkDetail::ChassisFeedforwardValid(latest_chassis_)) {
+      value.fx_n = latest_chassis_.fx_global;
+      value.fy_n = latest_chassis_.fy_global;
+      value.mz_nm = latest_chassis_.fw_global;
+      value.valid = true;
+    }
+    return value;
+  }
   CMD::Data BuildAI(LibXR::MillisecondTimestamp now) {
     CMD::Data value{};
     value.ctrl_source = CMD::ControlSource::CTRL_SOURCE_AI;
@@ -956,7 +993,7 @@ class HostDataLink {
   LibXR::Topic chassis_topic_, behavior_topic_, team_info_topic_,
       game_info_topic_, online_info_topic_, offline_info_topic_,
       radar_info_topic_, gimbal_feedback_topic_, nav_chassis_mode_topic_,
-      use_capacitor_topic_;
+      use_capacitor_topic_, chassis_ff_topic_;
   LibXR::Topic buy_bullet_topic_{
       LibXR::Topic::CreateTopic<uint16_t>("sentry_buy_bullet_num")};
   LibXR::Topic remote_bullet_topic_{
