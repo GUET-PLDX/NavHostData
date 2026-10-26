@@ -4,8 +4,8 @@
 /* === MODULE MANIFEST V2 ===
 module_description: ROS2_LIBXR navigation link protocol and host endpoint
 depends:
-- pldx/CMD@master
-- pldx/Referee@master
+- pldx/CMD@mc02-static
+- pldx/Referee@mc02-static
 === END MANIFEST === */
 // clang-format on
 
