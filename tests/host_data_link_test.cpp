@@ -20,16 +20,16 @@ using Pldx::HostDataLinkDetail::YawRadToCamerainitDeg;
 void ChassisWatchdogAndImmediateRecovery() {
   ChassisCommandTracker tracker;
   ChassisTarget moving{};
-  moving.vx_mps = 1.0F;
+  moving.fx_n = 1.0F;
   assert(tracker.Observe(moving, 0));
   assert(tracker.LastSequence() == 1U);
   assert(tracker.CommandFresh(149));
 
   ChassisTarget invalid = moving;
-  invalid.vw_rad_s = std::numeric_limits<float>::infinity();
+  invalid.mz_nm = std::numeric_limits<float>::infinity();
   assert(!tracker.Observe(invalid, 100));
   assert(tracker.RejectedCount() == 1U);
-  assert(tracker.CommandFresh(100));
+  assert(!tracker.CommandFresh(100));
 
   assert(tracker.Observe(moving, 101));
   assert(tracker.LastSequence() == 2U);
@@ -41,14 +41,17 @@ void ChassisWatchdogAndImmediateRecovery() {
   assert(tracker.CommandFresh(252));
 }
 
-void ChassisNavigationSpeedValidation() {
+void ChassisNavigationForceValidation() {
   ChassisTarget finite{};
-  finite.vx_mps = 30.0F;
-  finite.vy_mps = -30.0F;
-  finite.vw_rad_s = 30.0F;
+  finite.fx_n = 30.0F;
+  finite.fy_n = -30.0F;
+  finite.mz_nm = 30.0F;
   assert(ChassisCommandValid(finite));
+  finite.fx_n = 1001.0F;
+  assert(!ChassisCommandValid(finite));
+  finite.fx_n = 0.0F;
 
-  finite.vw_rad_s = std::numeric_limits<float>::infinity();
+  finite.mz_nm = std::numeric_limits<float>::infinity();
   assert(!ChassisCommandValid(finite));
 }
 
@@ -109,12 +112,12 @@ void EncoderYawWrapsToOpenClosedDegrees() {
 }
 
 int main() {
-  static_assert(sizeof(ChassisTarget) == 45U);
+  static_assert(sizeof(ChassisTarget) == 12U);
   static_assert(sizeof(BehaviorData) == 26U);
   static_assert(AUTO_CHASSIS_MODE_ROTOR == 2U);
   static_assert(AUTO_CHASSIS_MODE_NAVIGATION == 4U);
   ChassisWatchdogAndImmediateRecovery();
-  ChassisNavigationSpeedValidation();
+  ChassisNavigationForceValidation();
   BehaviorCumulativeDeltas();
   TunnelYawAlignment();
   EncoderYawWrapsToOpenClosedDegrees();

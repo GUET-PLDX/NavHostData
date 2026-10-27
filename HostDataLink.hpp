@@ -98,18 +98,9 @@ inline constexpr uint16_t REQUIRED_REFEREE_SOURCE_MASK =
 // ROS2_LIBXR wire payloads. Field order and one-byte packing are part of the
 // external contract; do not reorder or substitute integer widths.
 struct [[gnu::packed]] ChassisTarget {
-  float vx_mps{};      /* target velocity, m/s */
-  float vy_mps{};      /* target velocity, m/s */
-  float vw_rad_s{};    /* target yaw rate, rad/s */
-  float current_yaw{}; /* navigation yaw feedback, rad */
-  float current_vx{};  /* measured velocity, m/s */
-  float current_vy{};  /* measured velocity, m/s */
-  float current_vw{};  /* measured yaw rate, rad/s */
-  float fx_global{};   /* drive-force feedforward, N; same frame as vx_mps */
-  float fy_global{};   /* drive-force feedforward, N; same frame as vy_mps */
-  float fw_global{};   /* yaw-torque feedforward, N*m */
-  bool use_speed_control{}; /* true: speed path, false: direct force */
-  float delta_yaw{};        /* navigation/IMU yaw delta, rad */
+  float fx_n{};  /* chassis-frame force, N */
+  float fy_n{};  /* chassis-frame force, N */
+  float mz_nm{}; /* yaw torque, N*m */
 };
 
 struct [[gnu::packed]] BehaviorData {
@@ -211,7 +202,7 @@ struct [[gnu::packed]] GimbalFeedback {
 };
 
 static_assert(std::endian::native == std::endian::little);
-static_assert(sizeof(ChassisTarget) == 45U);
+static_assert(sizeof(ChassisTarget) == 12U);
 static_assert(sizeof(BehaviorData) == 26U);
 static_assert(sizeof(TeamInfo::AllyRobotStatus) == 11U);
 static_assert(sizeof(TeamInfo) == 48U);
@@ -222,8 +213,7 @@ static_assert(sizeof(EnemyRobotStatus) == 9U);
 static_assert(sizeof(RadarInfo) == 59U);
 static_assert(sizeof(GimbalFeedback) == 28U);
 static_assert(sizeof(GimbalFeedbackV1) == 12U);
-static_assert(offsetof(ChassisTarget, use_speed_control) == 40U);
-static_assert(offsetof(ChassisTarget, delta_yaw) == 41U);
+static_assert(offsetof(ChassisTarget, mz_nm) == 8U);
 static_assert(offsetof(BehaviorData, ammo_purchase_request) == 11U);
 static_assert(offsetof(BehaviorData, use_gyro_mode) == 25U);
 static_assert(offsetof(SentryInfoOffline, yaw_camerainit_to_gimbal) == 0U);
@@ -329,8 +319,7 @@ inline bool GimbalTargetValid(const HostGimbalTarget& value) {
 // Validate wire bool representations before copying bytes into C++ bools.
 inline bool ChassisPayloadValid(LibXR::ConstRawData payload) {
   return payload.addr_ != nullptr &&
-         payload.size_ == sizeof(HostDataLink::ChassisTarget) &&
-         static_cast<const uint8_t*>(payload.addr_)[40] <= 1U;
+         payload.size_ == sizeof(HostDataLink::ChassisTarget);
 }
 
 inline bool BehaviorPayloadValid(LibXR::ConstRawData payload) {
@@ -354,26 +343,9 @@ inline bool IsTunnelYawAligned(float chassis_yaw_rad, bool align_active,
 }
 
 inline bool ChassisCommandValid(const HostDataLink::ChassisTarget& command) {
-  return std::isfinite(command.vx_mps) && std::isfinite(command.vy_mps) &&
-         std::isfinite(command.vw_rad_s) &&
-         std::isfinite(command.current_yaw) &&
-         std::isfinite(command.current_vx) &&
-         std::isfinite(command.current_vy) &&
-         std::isfinite(command.current_vw) && std::isfinite(command.delta_yaw);
-}
-
-/* 驱动力前馈的合理性上限：超过即视为错误数据丢弃（底盘侧另有实际限幅）。 */
-inline constexpr float CHASSIS_FEEDFORWARD_SANITY_LIMIT = 1000.0F;
-
-inline bool ChassisFeedforwardValid(
-    const HostDataLink::ChassisTarget& command) {
-  const float VALUES[3] = {command.fx_global, command.fy_global,
-                           command.fw_global};
-  for (float value : VALUES) {
-    if (!std::isfinite(value) ||
-        std::fabs(value) > CHASSIS_FEEDFORWARD_SANITY_LIMIT) {
-      return false;
-    }
+  constexpr float SANITY_LIMIT = 1000.0F;
+  for (float value : {command.fx_n, command.fy_n, command.mz_nm}) {
+    if (!std::isfinite(value) || std::fabs(value) > SANITY_LIMIT) return false;
   }
   return true;
 }
@@ -418,6 +390,7 @@ class ChassisCommandTracker {
     ++accepted_count_;
   }
   bool Reject() {
+    armed_ = false;
     ++rejected_count_;
     return false;
   }
@@ -850,15 +823,13 @@ class HostDataLink {
         chassis_imu_yaw_valid_);
     offline_info_topic_.Publish(info);
   }
-  /* 与 BuildAI 的速度同源、同新鲜度：命令过期或前馈非法时发布无效（零）前馈。
-   */
+  /* Expired host commands publish an invalid zero drive wrench. */
   CMD::NavigationFeedforward BuildFeedforward(LibXR::MillisecondTimestamp now) {
     CMD::NavigationFeedforward value{};
-    if (tracker_.CommandFresh(now) &&
-        Pldx::HostDataLinkDetail::ChassisFeedforwardValid(latest_chassis_)) {
-      value.fx_n = latest_chassis_.fx_global;
-      value.fy_n = latest_chassis_.fy_global;
-      value.mz_nm = latest_chassis_.fw_global;
+    if (tracker_.CommandFresh(now)) {
+      value.fx_n = latest_chassis_.fx_n;
+      value.fy_n = latest_chassis_.fy_n;
+      value.mz_nm = latest_chassis_.mz_nm;
       value.valid = true;
     }
     return value;
@@ -868,9 +839,6 @@ class HostDataLink {
     value.ctrl_source = CMD::ControlSource::CTRL_SOURCE_AI;
     if (tracker_.CommandFresh(now)) {
       value.chassis.source = CMD::ChassisCommandSource::NAVIGATION;
-      value.chassis.navigation_velocity.vx_mps = latest_chassis_.vx_mps;
-      value.chassis.navigation_velocity.vy_mps = latest_chassis_.vy_mps;
-      value.chassis.navigation_velocity.wz_rad_s = latest_chassis_.vw_rad_s;
       value.chassis_online = true;
     }
     if (visual_gimbal_seen_ &&

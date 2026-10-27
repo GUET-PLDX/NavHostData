@@ -6,10 +6,10 @@ MODULE_DIR=$(dirname -- "$SCRIPT_DIR")
 BUILD_DIR=$(mktemp -d /tmp/nav-host-data-layout-test.XXXXXX)
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
-g++ -DHOST_DATA_LINK_PROTOCOL_ONLY -std=c++20 -Wall -Wextra -Werror \
+g++ -std=c++20 -Wall -Wextra -Werror \
   -I"$MODULE_DIR" \
-  -I"$MODULE_DIR/../../.tooling/LibXR-v2.0.1/src/core" \
-  -I"$MODULE_DIR/../../.tooling/LibXR-v2.0.1/src/core/assert" \
+  -I"$MODULE_DIR/../../Middlewares/Third_Party/LibXR/src/core" \
+  -I"$MODULE_DIR/../../Middlewares/Third_Party/LibXR/src/core/assert" \
   "$SCRIPT_DIR/host_data_link_layout_test.cpp" \
   -o "$BUILD_DIR/host_data_link_layout_test"
 
