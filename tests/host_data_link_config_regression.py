@@ -37,17 +37,20 @@ def main():
         'chassis_feedback',
     ]
     assert args('navigation_tx')['slot_count'] > 0
-    assert args('vision_rx')['uart'] == 'usb_vision_cdc'
-    assert topics('vision_rx') == ['target_euler', 'fire_notify']
+    assert modules['talos_link']['module'] == 'GUET-PLDX/TalosLink'
+    assert args('talos_link')['cmd'] == 'cmd'
+    assert args('talos_link')['uart'] == 'usb_vision_cdc'
     assert all(m['module'] != 'GUET-PLDX/HostData' for m in modules.values())
     registry = yaml.safe_load((ROOT / 'Modules/modules.yaml').read_text())['modules']
-    assert 'GUET-PLDX/HostDataLink' in registry
+    assert 'GUET-PLDX/HostDataLink' in [r.split('@')[0] if isinstance(r, str) else r['id'] for r in registry]
     source = (ROOT / 'Modules/HostDataLink/HostDataLink.hpp').read_text()
     assert 'navigation_velocity' not in source
     for field in ('fx_n', 'fy_n', 'mz_nm'):
-        assert f'value.{field} = latest_chassis_.{field}' in source
+        assert f'latest_chassis_.{field}' in source
+    assert 'value.chassis.ff_valid = true' in source
+    assert 'chassis_ff_topic_' not in source
     assert source.index('tracker_.Observe(value, NOW)') < source.index('latest_chassis_ = value')
-    print('PASS: navigation force and vision ownership configuration')
+    print('PASS: navigation force ownership and Talos visual link configuration')
 
 
 if __name__ == '__main__':

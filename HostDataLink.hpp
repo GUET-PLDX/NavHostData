@@ -25,8 +25,6 @@ namespace Pldx::HostDataLink {
 
 inline constexpr char CHASSIS_TARGET_TOPIC[] = "nav_data";
 inline constexpr char DECISION_COMMAND_TOPIC[] = "behavior_data";
-inline constexpr char TARGET_EULER_TOPIC[] = "target_euler";
-inline constexpr char FIRE_NOTIFY_TOPIC[] = "fire_notify";
 inline constexpr char TEAM_INFO_TOPIC[] = "team_info";
 inline constexpr char GAME_INFO_TOPIC[] = "game_info";
 inline constexpr char ONLINE_INFO_TOPIC[] = "online_info";
@@ -234,30 +232,9 @@ static_assert(std::is_trivially_copyable_v<RadarInfo>);
 
 }  // namespace Pldx::HostDataLink
 
-namespace Pldx::HostChassisSession {
-
-inline constexpr char STATUS_TOPIC[] = "host_chassis_session_status";
-inline constexpr uint32_t FRESHNESS_TIMEOUT_MS = 150U;
-
-struct Status {
-  uint32_t accepted_sequence = 0U;
-  uint32_t accepted_time_ms = 0U;
-  bool accepted_seen = false;
-  bool armed_fresh = false;
-};
-
-inline bool IsFresh(const Status& status, LibXR::MillisecondTimestamp now) {
-  return status.accepted_seen && status.armed_fresh &&
-         (now - LibXR::MillisecondTimestamp(status.accepted_time_ms))
-                 .ToMillisecond() <= FRESHNESS_TIMEOUT_MS;
-}
-
-}  // namespace Pldx::HostChassisSession
-
 namespace Pldx::HostDataLinkDetail {
 
 inline constexpr uint32_t COMMAND_TIMEOUT_MS = 150U;
-inline constexpr uint32_t VISUAL_SOURCE_TIMEOUT_MS = 150U;
 inline constexpr float CHASSIS_YAW_ALIGNMENT_TOLERANCE_RAD = 0.05F;
 inline constexpr uint32_t AUTO_CHASSIS_MODE_ROTOR = 2U;
 inline constexpr uint32_t AUTO_CHASSIS_MODE_NAVIGATION = 4U;
@@ -282,38 +259,6 @@ inline float YawRadToCamerainitDeg(float yaw_rad) {
     wrapped = 180.0F;
   }
   return wrapped;
-}
-
-struct HostGimbalTarget {
-  float rol{}, pit{}, yaw{};
-  float rol_dot{}, pit_dot{}, yaw_dot{};
-  float rol_ddot{}, pit_ddot{}, yaw_ddot{};
-};
-struct HostFireNotify {
-  bool isfire{};
-};
-
-static_assert(sizeof(HostGimbalTarget) == 36U);
-static_assert(sizeof(HostFireNotify) == 1U);
-static_assert(offsetof(HostGimbalTarget, rol) == 0U);
-static_assert(offsetof(HostGimbalTarget, pit) == 4U);
-static_assert(offsetof(HostGimbalTarget, yaw) == 8U);
-static_assert(offsetof(HostGimbalTarget, rol_dot) == 12U);
-static_assert(offsetof(HostGimbalTarget, pit_dot) == 16U);
-static_assert(offsetof(HostGimbalTarget, yaw_dot) == 20U);
-static_assert(offsetof(HostGimbalTarget, rol_ddot) == 24U);
-static_assert(offsetof(HostGimbalTarget, pit_ddot) == 28U);
-static_assert(offsetof(HostGimbalTarget, yaw_ddot) == 32U);
-static_assert(offsetof(HostFireNotify, isfire) == 0U);
-static_assert(std::is_trivially_copyable_v<HostGimbalTarget>);
-static_assert(std::is_trivially_copyable_v<HostFireNotify>);
-
-inline bool GimbalTargetValid(const HostGimbalTarget& value) {
-  return std::isfinite(value.rol) && std::isfinite(value.pit) &&
-         std::isfinite(value.yaw) && std::isfinite(value.rol_dot) &&
-         std::isfinite(value.pit_dot) && std::isfinite(value.yaw_dot) &&
-         std::isfinite(value.rol_ddot) && std::isfinite(value.pit_ddot) &&
-         std::isfinite(value.yaw_ddot);
 }
 
 // Validate wire bool representations before copying bytes into C++ bools.
@@ -498,101 +443,39 @@ bool DispatchDecision(const DecisionPublication& value, Sink& sink) {
 #include "message.hpp"
 #include "mutex.hpp"
 #include "timebase.hpp"
-#include "timer.hpp"
 #include "uart.hpp"
+#endif  // HOST_DATA_LINK_PROTOCOL_ONLY
+
+/* 协议专用构建（主机测试）不含固件头文件；构造接口无条件声明，只用前向声明类型。
+ */
+namespace LibXR {
+class UART;
+}
+class CMD;
 
 class HostDataLink {
  public:
+  /// @brief 监控循环入口，由静态装配的监控循环调用。
+  ///        协议专用构建（主机测试）下为空实现，不实例化本类。
+  void OnMonitor() {
+#ifndef HOST_DATA_LINK_PROTOCOL_ONLY
+
+    CMD::Data input{};
+    {
+      LibXR::Mutex::LockGuard lock(mutex_);
+      input = BuildAI(Now());
+    }
+    cmd_->FeedAIChassis(input);
+#endif  // HOST_DATA_LINK_PROTOCOL_ONLY
+  }
+
   HostDataLink(LibXR::UART& uart, CMD& cmd,
                const char* referee_topic_name = "sentry_ref",
                const char* pitch_topic_name = "pitchmotor_angle",
                const char* yaw_topic_name = "yawmotor_angle",
-               const char* quaternion_topic_name = "ahrs_quaternion")
-      : cmd_(&cmd),
-        uart_(&uart),
-        chassis_topic_(
-            LibXR::Topic::CreateTopic<Pldx::HostDataLink::ChassisTarget>(
-                "nav_data")),
-        behavior_topic_(
-            LibXR::Topic::CreateTopic<Pldx::HostDataLink::BehaviorData>(
-                "behavior_data")),
-        team_info_topic_(
-            LibXR::Topic::CreateTopic<Pldx::HostDataLink::TeamInfo>(
-                "team_info")),
-        game_info_topic_(
-            LibXR::Topic::CreateTopic<Pldx::HostDataLink::GameInfo>(
-                "game_info")),
-        online_info_topic_(
-            LibXR::Topic::CreateTopic<Pldx::HostDataLink::SentryInfoOnline>(
-                "online_info")),
-        offline_info_topic_(
-            LibXR::Topic::CreateTopic<Pldx::HostDataLink::SentryInfoOffline>(
-                "offline_info")),
-        radar_info_topic_(
-            LibXR::Topic::CreateTopic<Pldx::HostDataLink::RadarInfo>(
-                "radar_info")),
-        gimbal_feedback_topic_(
-            LibXR::Topic::CreateTopic<Pldx::HostDataLink::GimbalFeedback>(
-                Pldx::HostDataLink::GIMBAL_FEEDBACK_TOPIC)),
-        nav_chassis_mode_topic_(LibXR::Topic::CreateTopic<uint32_t>(
-            "nav_chassis_mode", nullptr, false)),
-        use_capacitor_topic_(
-            LibXR::Topic::CreateTopic<bool>("use_capacitor", nullptr, false)),
-        chassis_ff_topic_(LibXR::Topic::CreateTopic<CMD::NavigationFeedforward>(
-            "chassis_ff", nullptr, false)) {
-    ASSERT(uart_->SetConfig({921600U, LibXR::UART::Parity::NO_PARITY, 8U,
-                             1U}) == LibXR::ErrorCode::OK);
-    RegisterRawCallback<&HostDataLink::OnChassis>(chassis_topic_);
-    RegisterRawCallback<&HostDataLink::OnBehavior>(behavior_topic_);
-    RegisterNamedCallback<Referee::RobotGameRefereePack,
-                          &HostDataLink::OnReferee>(referee_topic_name);
-    RegisterNamedCallback<Pldx::HostDataLinkDetail::HostGimbalTarget,
-                          &HostDataLink::OnVisualGimbal>(
-        Pldx::HostDataLink::TARGET_EULER_TOPIC);
-    RegisterNamedCallback<Pldx::HostDataLinkDetail::HostFireNotify,
-                          &HostDataLink::OnVisualFire>(
-        Pldx::HostDataLink::FIRE_NOTIFY_TOPIC);
-    RegisterNamedCallback<Pldx::HostDataLink::GimbalFeedbackV1,
-                          &HostDataLink::OnLauncherFeedback>(
-        Pldx::HostDataLink::LAUNCHER_FEEDBACK_TOPIC);
-    RegisterNamedCallback<float, &HostDataLink::OnGimbalYaw>(yaw_topic_name);
-    RegisterNamedCallback<float, &HostDataLink::OnGimbalPitch>(
-        pitch_topic_name);
-    RegisterNamedCallback<float, &HostDataLink::OnGimbalYawOmega>(
-        "yawmotor_omega");
-    RegisterNamedCallback<float, &HostDataLink::OnGimbalPitchOmega>(
-        "pitchmotor_omega");
-    RegisterNamedCallback<uint8_t, &HostDataLink::OnGimbalMode>("gimbal_mode");
-    RegisterNamedCallback<uint8_t, &HostDataLink::OnVisionTask>("vision_task");
-    RegisterNamedCallback<float, &HostDataLink::OnChassisYaw>(
-        "chassis_imu_yaw");
-    RegisterNamedCallback<bool, &HostDataLink::OnChassisYawValid>(
-        "chassis_imu_yaw_valid");
-    RegisterNamedCallback<uint8_t, &HostDataLink::OnCapacitorCapacity>(
-        "chassis_capacitor_capacity");
-    RegisterNamedCallback<bool, &HostDataLink::OnCapacitorValid>(
-        "chassis_capacitor_valid");
-    UNUSED(pitch_topic_name);
-    UNUSED(yaw_topic_name);
-    UNUSED(quaternion_topic_name);
-    // A single periodic writer merges both CDC inputs and expires them even
-    // when the host sends no more frames. Reuse LibXR's software timer.
-    command_timer_ = LibXR::Timer::CreateTask(
-        +[](HostDataLink* self) {
-          CMD::NavigationFeedforward feedforward{};
-          {
-            LibXR::Mutex::LockGuard lock(self->mutex_);
-            const auto NOW = Now();
-            self->cmd_->FeedAI(self->BuildAI(NOW));
-            feedforward = self->BuildFeedforward(NOW);
-          }
-          self->chassis_ff_topic_.Publish(feedforward);
-        },
-        this, 5);
-    LibXR::Timer::Add(command_timer_);
-    LibXR::Timer::Start(command_timer_);
-  }
+               const char* quaternion_topic_name = "ahrs_quaternion");
 
+#ifndef HOST_DATA_LINK_PROTOCOL_ONLY
  private:
   static LibXR::MillisecondTimestamp Now() {
     return LibXR::Timebase::GetMilliseconds();
@@ -600,16 +483,13 @@ class HostDataLink {
   template <typename Data, void (HostDataLink::*Method)(const Data&)>
   void RegisterCallback(LibXR::Topic& topic) {
     auto cb = LibXR::Topic::Callback::Create(
-        [](bool, HostDataLink* self,
+        [](bool in_isr, HostDataLink* self,
            const LibXR::Topic::RawMessageView& message) {
+          ASSERT(!in_isr);
+          if (in_isr) return;
           if (message.payload.addr_ == nullptr ||
               message.payload.size_ != sizeof(Data))
             return;
-          if constexpr (std::is_same_v<
-                            Data, Pldx::HostDataLinkDetail::HostFireNotify>) {
-            if (*static_cast<const uint8_t*>(message.payload.addr_) > 1U)
-              return;
-          }
           Data data{};
           LibXR::Memory::FastCopy(&data, message.payload.addr_, sizeof(data));
           (self->*Method)(data);
@@ -621,8 +501,10 @@ class HostDataLink {
       void (HostDataLink::*Method)(const Pldx::HostDataLink::ChassisTarget&)>
   void RegisterRawCallback(LibXR::Topic& topic) {
     auto cb = LibXR::Topic::Callback::Create(
-        [](bool, HostDataLink* self,
+        [](bool in_isr, HostDataLink* self,
            const LibXR::Topic::RawMessageView& message) {
+          ASSERT(!in_isr);
+          if (in_isr) return;
           if (message.timestamp == 0U ||
               !Pldx::HostDataLinkDetail::ChassisPayloadValid(message.payload)) {
             return;
@@ -638,8 +520,10 @@ class HostDataLink {
       void (HostDataLink::*Method)(const Pldx::HostDataLink::BehaviorData&)>
   void RegisterRawCallback(LibXR::Topic& topic) {
     auto cb = LibXR::Topic::Callback::Create(
-        [](bool, HostDataLink* self,
+        [](bool in_isr, HostDataLink* self,
            const LibXR::Topic::RawMessageView& message) {
+          ASSERT(!in_isr);
+          if (in_isr) return;
           if (message.timestamp == 0U ||
               !Pldx::HostDataLinkDetail::BehaviorPayloadValid(
                   message.payload)) {
@@ -666,7 +550,6 @@ class HostDataLink {
   }
   void OnBehavior(const Pldx::HostDataLink::BehaviorData& value) {
     Pldx::HostDataLinkDetail::DecisionPublication publication;
-    bool publish_chassis_mode = false;
     uint32_t chassis_mode =
         Pldx::HostDataLinkDetail::AUTO_CHASSIS_MODE_NAVIGATION;
     {
@@ -676,7 +559,6 @@ class HostDataLink {
       tunnel_align_active_ = value.tunnel_align_active;
       tunnel_align_angle_rad_ = value.tunnel_align_angle_rad;
       PublishOffline();
-      publish_chassis_mode = cmd_->GetCtrlMode() == CMD::Mode::CMD_AUTO_CTRL;
       chassis_mode =
           value.use_gyro_mode
               ? Pldx::HostDataLinkDetail::AUTO_CHASSIS_MODE_ROTOR
@@ -684,24 +566,9 @@ class HostDataLink {
     }
     bool use_capacitor = value.use_capacitor;
     use_capacitor_topic_.Publish(use_capacitor);
-    if (publish_chassis_mode) {
-      nav_chassis_mode_topic_.Publish(chassis_mode);
-    }
+    nav_chassis_mode_topic_.Publish(chassis_mode);
     Sink sink(*this);
     Pldx::HostDataLinkDetail::DispatchDecision(publication, sink);
-  }
-  void OnVisualGimbal(const Pldx::HostDataLinkDetail::HostGimbalTarget& value) {
-    LibXR::Mutex::LockGuard lock(mutex_);
-    if (!Pldx::HostDataLinkDetail::GimbalTargetValid(value)) return;
-    visual_gimbal_ = value;
-    visual_gimbal_time_ = Now();
-    visual_gimbal_seen_ = true;
-  }
-  void OnVisualFire(const Pldx::HostDataLinkDetail::HostFireNotify& value) {
-    LibXR::Mutex::LockGuard lock(mutex_);
-    visual_fire_ = value;
-    visual_fire_time_ = Now();
-    visual_fire_seen_ = true;
   }
   void OnLauncherFeedback(const Pldx::HostDataLink::GimbalFeedbackV1& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
@@ -823,40 +690,16 @@ class HostDataLink {
         chassis_imu_yaw_valid_);
     offline_info_topic_.Publish(info);
   }
-  /* Expired host commands publish an invalid zero drive wrench. */
-  CMD::NavigationFeedforward BuildFeedforward(LibXR::MillisecondTimestamp now) {
-    CMD::NavigationFeedforward value{};
-    if (tracker_.CommandFresh(now)) {
-      value.fx_n = latest_chassis_.fx_n;
-      value.fy_n = latest_chassis_.fy_n;
-      value.mz_nm = latest_chassis_.mz_nm;
-      value.valid = true;
-    }
-    return value;
-  }
   CMD::Data BuildAI(LibXR::MillisecondTimestamp now) {
     CMD::Data value{};
     value.ctrl_source = CMD::ControlSource::CTRL_SOURCE_AI;
     if (tracker_.CommandFresh(now)) {
-      value.chassis.source = CMD::ChassisCommandSource::NAVIGATION;
+      value.chassis.fx_n = latest_chassis_.fx_n;
+      value.chassis.fy_n = latest_chassis_.fy_n;
+      value.chassis.mz_nm = latest_chassis_.mz_nm;
+      value.chassis.ff_valid = true;
       value.chassis_online = true;
     }
-    if (visual_gimbal_seen_ &&
-        (now - visual_gimbal_time_).ToMillisecond() <=
-            Pldx::HostDataLinkDetail::VISUAL_SOURCE_TIMEOUT_MS) {
-      value.gimbal.yaw = visual_gimbal_.yaw;
-      value.gimbal.pit = visual_gimbal_.pit;
-      value.gimbal.yaw_dot = visual_gimbal_.yaw_dot;
-      value.gimbal.pit_dot = visual_gimbal_.pit_dot;
-      value.gimbal.yaw_ddot = visual_gimbal_.yaw_ddot;
-      value.gimbal.pit_ddot = visual_gimbal_.pit_ddot;
-      value.gimbal_online = true;
-    }
-    if (visual_fire_seen_ &&
-        (now - visual_fire_time_).ToMillisecond() <=
-            Pldx::HostDataLinkDetail::VISUAL_SOURCE_TIMEOUT_MS &&
-        value.gimbal_online)
-      value.launcher.isfire = visual_fire_.isfire;
     return value;
   }
   void OnReferee(const Referee::RobotGameRefereePack& source) {
@@ -957,11 +800,10 @@ class HostDataLink {
   CMD* cmd_;
   LibXR::UART* uart_;
   LibXR::Mutex mutex_;
-  LibXR::Timer::TimerHandle command_timer_{};
   LibXR::Topic chassis_topic_, behavior_topic_, team_info_topic_,
       game_info_topic_, online_info_topic_, offline_info_topic_,
       radar_info_topic_, gimbal_feedback_topic_, nav_chassis_mode_topic_,
-      use_capacitor_topic_, chassis_ff_topic_;
+      use_capacitor_topic_;
   LibXR::Topic buy_bullet_topic_{
       LibXR::Topic::CreateTopic<uint16_t>("sentry_buy_bullet_num")};
   LibXR::Topic remote_bullet_topic_{
@@ -971,10 +813,6 @@ class HostDataLink {
   LibXR::Topic resurrection_topic_{
       LibXR::Topic::CreateTopic<bool>("sentry_buy_resurrection")};
   Pldx::HostDataLink::ChassisTarget latest_chassis_{};
-  Pldx::HostDataLinkDetail::HostGimbalTarget visual_gimbal_{};
-  Pldx::HostDataLinkDetail::HostFireNotify visual_fire_{};
-  LibXR::MillisecondTimestamp visual_gimbal_time_{}, visual_fire_time_{};
-  bool visual_gimbal_seen_{}, visual_fire_seen_{};
   float yawmotor_angle_{};
   LibXR::MillisecondTimestamp yaw_omega_time_{};
   LibXR::MillisecondTimestamp pitch_omega_time_{};
@@ -989,6 +827,70 @@ class HostDataLink {
   Pldx::HostDataLink::GimbalFeedback gimbal_feedback_{};
   Pldx::HostDataLinkDetail::ChassisCommandTracker tracker_;
   Pldx::HostDataLinkDetail::DecisionSequenceTracker decision_;
+#endif  // HOST_DATA_LINK_PROTOCOL_ONLY
 };
+
+#ifndef HOST_DATA_LINK_PROTOCOL_ONLY
+inline HostDataLink::HostDataLink(LibXR::UART& uart, CMD& cmd,
+                                  const char* referee_topic_name,
+                                  const char* pitch_topic_name,
+                                  const char* yaw_topic_name,
+                                  const char* quaternion_topic_name)
+    : cmd_(&cmd),
+      uart_(&uart),
+      chassis_topic_(
+          LibXR::Topic::CreateTopic<Pldx::HostDataLink::ChassisTarget>(
+              "nav_data")),
+      behavior_topic_(
+          LibXR::Topic::CreateTopic<Pldx::HostDataLink::BehaviorData>(
+              "behavior_data")),
+      team_info_topic_(
+          LibXR::Topic::CreateTopic<Pldx::HostDataLink::TeamInfo>("team_info")),
+      game_info_topic_(
+          LibXR::Topic::CreateTopic<Pldx::HostDataLink::GameInfo>("game_info")),
+      online_info_topic_(
+          LibXR::Topic::CreateTopic<Pldx::HostDataLink::SentryInfoOnline>(
+              "online_info")),
+      offline_info_topic_(
+          LibXR::Topic::CreateTopic<Pldx::HostDataLink::SentryInfoOffline>(
+              "offline_info")),
+      radar_info_topic_(
+          LibXR::Topic::CreateTopic<Pldx::HostDataLink::RadarInfo>(
+              "radar_info")),
+      gimbal_feedback_topic_(
+          LibXR::Topic::CreateTopic<Pldx::HostDataLink::GimbalFeedback>(
+              Pldx::HostDataLink::GIMBAL_FEEDBACK_TOPIC)),
+      nav_chassis_mode_topic_(LibXR::Topic::CreateTopic<uint32_t>(
+          "nav_chassis_mode", nullptr, false)),
+      use_capacitor_topic_(
+          LibXR::Topic::CreateTopic<bool>("use_capacitor", nullptr, false)) {
+  ASSERT(uart_->SetConfig({921600U, LibXR::UART::Parity::NO_PARITY, 8U, 1U}) ==
+         LibXR::ErrorCode::OK);
+  RegisterRawCallback<&HostDataLink::OnChassis>(chassis_topic_);
+  RegisterRawCallback<&HostDataLink::OnBehavior>(behavior_topic_);
+  RegisterNamedCallback<Referee::RobotGameRefereePack,
+                        &HostDataLink::OnReferee>(referee_topic_name);
+  RegisterNamedCallback<Pldx::HostDataLink::GimbalFeedbackV1,
+                        &HostDataLink::OnLauncherFeedback>(
+      Pldx::HostDataLink::LAUNCHER_FEEDBACK_TOPIC);
+  RegisterNamedCallback<float, &HostDataLink::OnGimbalYaw>(yaw_topic_name);
+  RegisterNamedCallback<float, &HostDataLink::OnGimbalPitch>(pitch_topic_name);
+  RegisterNamedCallback<float, &HostDataLink::OnGimbalYawOmega>(
+      "yawmotor_omega");
+  RegisterNamedCallback<float, &HostDataLink::OnGimbalPitchOmega>(
+      "pitchmotor_omega");
+  RegisterNamedCallback<uint8_t, &HostDataLink::OnGimbalMode>("gimbal_mode");
+  RegisterNamedCallback<uint8_t, &HostDataLink::OnVisionTask>("vision_task");
+  RegisterNamedCallback<float, &HostDataLink::OnChassisYaw>("chassis_imu_yaw");
+  RegisterNamedCallback<bool, &HostDataLink::OnChassisYawValid>(
+      "chassis_imu_yaw_valid");
+  RegisterNamedCallback<uint8_t, &HostDataLink::OnCapacitorCapacity>(
+      "chassis_capacitor_capacity");
+  RegisterNamedCallback<bool, &HostDataLink::OnCapacitorValid>(
+      "chassis_capacitor_valid");
+  UNUSED(pitch_topic_name);
+  UNUSED(yaw_topic_name);
+  UNUSED(quaternion_topic_name);
+}
 
 #endif  // HOST_DATA_LINK_PROTOCOL_ONLY
