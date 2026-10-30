@@ -239,6 +239,7 @@ inline constexpr float CHASSIS_YAW_ALIGNMENT_TOLERANCE_RAD = 0.05F;
 inline constexpr uint32_t AUTO_CHASSIS_MODE_ROTOR = 2U;
 inline constexpr uint32_t AUTO_CHASSIS_MODE_NAVIGATION = 4U;
 inline constexpr uint32_t FEEDBACK_OMEGA_TIMEOUT_MS = 50U;
+inline constexpr uint32_t FEEDBACK_FIELD_TIMEOUT_MS = 250U;
 
 inline bool AngularVelocityFresh(LibXR::MillisecondTimestamp now,
                                  LibXR::MillisecondTimestamp yaw_time,
@@ -301,7 +302,6 @@ class ChassisCommandTracker {
                LibXR::MillisecondTimestamp now) {
     Expire(now);
     command_seen_ = true;
-    schema_ok_ = true;
     finite_ = ChassisCommandValid(command);
     if (!finite_) return Reject();
     Accept(now);
@@ -316,7 +316,6 @@ class ChassisCommandTracker {
     uint32_t flags = 1U;
     if (command_seen_) flags |= 1U << 1U;
     if (CommandFresh(now)) flags |= 1U << 2U;
-    if (schema_ok_) flags |= 1U << 3U;
     if (finite_) flags |= 1U << 4U;
     return flags;
   }
@@ -347,7 +346,7 @@ class ChassisCommandTracker {
   }
   LibXR::MillisecondTimestamp last_command_time_{};
   uint32_t rejected_count_{}, accepted_count_{};
-  bool command_seen_{}, accepted_command_seen_{}, schema_ok_{}, finite_{};
+  bool command_seen_{}, accepted_command_seen_{}, finite_{};
   bool armed_{};
 };
 
@@ -365,6 +364,8 @@ struct DecisionPublication {
 
 class DecisionSequenceTracker {
  public:
+  // BehaviorData uses independent monotonic counters; a decrease resets that
+  // counter's baseline and emits no event for that counter.
   DecisionPublication Decode(const HostDataLink::BehaviorData& value,
                              bool ready = true) {
     DecisionPublication result;
@@ -383,21 +384,22 @@ class DecisionSequenceTracker {
           Delta(value.remote_ammo_request, remote_ammo_);
       result.remote_buy_hp_times =
           Delta(value.remote_health_request, remote_hp_);
-      const bool rollback = value.ammo_purchase_request < ammo_ ||
-                            value.remote_ammo_request < remote_ammo_ ||
-                            value.remote_health_request < remote_hp_ ||
-                            value.revive_request < revive_ ||
-                            value.remote_revive_request < remote_revive_;
-      if (!rollback) {
-        result.publish_buy_bullet_num = result.buy_bullet_num != 0U;
-        result.publish_remote_buy_bullet_times =
-            result.remote_buy_bullet_times != 0U;
-        result.publish_remote_buy_hp_times = result.remote_buy_hp_times != 0U;
-        result.publish_buy_resurrection =
-            value.revive_request != revive_ ||
-            value.remote_revive_request != remote_revive_;
-        result.buy_resurrection = result.publish_buy_resurrection;
-      }
+      const bool ammo_rollback = value.ammo_purchase_request < ammo_;
+      const bool remote_ammo_rollback =
+          value.remote_ammo_request < remote_ammo_;
+      const bool remote_hp_rollback = value.remote_health_request < remote_hp_;
+      const bool revive_rollback = value.revive_request < revive_ ||
+                                   value.remote_revive_request < remote_revive_;
+      result.publish_buy_bullet_num =
+          !ammo_rollback && result.buy_bullet_num != 0U;
+      result.publish_remote_buy_bullet_times =
+          !remote_ammo_rollback && result.remote_buy_bullet_times != 0U;
+      result.publish_remote_buy_hp_times =
+          !remote_hp_rollback && result.remote_buy_hp_times != 0U;
+      result.publish_buy_resurrection =
+          !revive_rollback && (value.revive_request > revive_ ||
+                               value.remote_revive_request > remote_revive_);
+      result.buy_resurrection = result.publish_buy_resurrection;
     }
     ammo_ = value.ammo_purchase_request;
     remote_ammo_ = value.remote_ammo_request;
@@ -435,47 +437,23 @@ bool DispatchDecision(const DecisionPublication& value, Sink& sink) {
 
 }  // namespace Pldx::HostDataLinkDetail
 
-#ifndef HOST_DATA_LINK_PROTOCOL_ONLY
-
 #include "CMD.hpp"
 #include "Referee.hpp"
 #include "libxr.hpp"
 #include "message.hpp"
 #include "mutex.hpp"
 #include "timebase.hpp"
-#include "uart.hpp"
-#endif  // HOST_DATA_LINK_PROTOCOL_ONLY
-
-/* 协议专用构建（主机测试）不含固件头文件；构造接口无条件声明，只用前向声明类型。
- */
-namespace LibXR {
-class UART;
-}
-class CMD;
-
+#include "timer.hpp"
 class HostDataLink {
  public:
   /// @brief 监控循环入口，由静态装配的监控循环调用。
-  ///        协议专用构建（主机测试）下为空实现，不实例化本类。
-  void OnMonitor() {
-#ifndef HOST_DATA_LINK_PROTOCOL_ONLY
+  void OnMonitor() {}
 
-    CMD::Data input{};
-    {
-      LibXR::Mutex::LockGuard lock(mutex_);
-      input = BuildAI(Now());
-    }
-    cmd_->FeedAIChassis(input);
-#endif  // HOST_DATA_LINK_PROTOCOL_ONLY
-  }
-
-  HostDataLink(LibXR::UART& uart, CMD& cmd,
-               const char* referee_topic_name = "sentry_ref",
+  HostDataLink(CMD& cmd, const char* referee_topic_name = "sentry_ref",
                const char* pitch_topic_name = "pitchmotor_angle",
                const char* yaw_topic_name = "yawmotor_angle",
                const char* quaternion_topic_name = "ahrs_quaternion");
 
-#ifndef HOST_DATA_LINK_PROTOCOL_ONLY
  private:
   static LibXR::MillisecondTimestamp Now() {
     return LibXR::Timebase::GetMilliseconds();
@@ -546,7 +524,38 @@ class HostDataLink {
     const auto NOW = Now();
     if (tracker_.Observe(value, NOW)) {
       latest_chassis_ = value;
+      chassis_submitted_online_ = true;
+      cmd_->FeedAIChassis(BuildAI(NOW));
+    } else if (chassis_submitted_online_) {
+      chassis_submitted_online_ = false;
+      cmd_->FeedAIChassis(BuildAI(NOW));
     }
+  }
+  void CheckChassisTimeout() {
+    LibXR::Mutex::LockGuard lock(mutex_);
+    if (chassis_submitted_online_ && !tracker_.CommandFresh(Now())) {
+      chassis_submitted_online_ = false;
+      cmd_->FeedAIChassis(BuildAI(Now()));
+    }
+    const auto now = Now();
+    bool changed = false;
+    if (chassis_imu_yaw_valid_ &&
+        (now - chassis_yaw_time_).ToMillisecond() > 250U) {
+      chassis_imu_yaw_valid_ = false;
+      changed = true;
+    }
+    if (capacitor_capacity_valid_ &&
+        (now - capacitor_time_).ToMillisecond() > 300U) {
+      capacitor_capacity_valid_ = false;
+      changed = true;
+    }
+    if (tunnel_align_active_ && (now - behavior_time_).ToMillisecond() > 250U) {
+      tunnel_align_active_ = false;
+      changed = true;
+    }
+    if (changed) PublishOffline();
+    if (RefreshGimbalFeedback(Now()))
+      gimbal_feedback_topic_.Publish(gimbal_feedback_);
   }
   void OnBehavior(const Pldx::HostDataLink::BehaviorData& value) {
     Pldx::HostDataLinkDetail::DecisionPublication publication;
@@ -558,6 +567,7 @@ class HostDataLink {
       if (!publication.accepted) return;
       tunnel_align_active_ = value.tunnel_align_active;
       tunnel_align_angle_rad_ = value.tunnel_align_angle_rad;
+      behavior_time_ = Now();
       PublishOffline();
       chassis_mode =
           value.use_gyro_mode
@@ -583,11 +593,16 @@ class HostDataLink {
     gimbal_feedback_.valid_flags =
         static_cast<uint8_t>((gimbal_feedback_.valid_flags & ~kLauncherFlags) |
                              (value.valid_flags & kLauncherFlags));
+    launcher_valid_flags_ =
+        static_cast<uint8_t>(value.valid_flags & kLauncherFlags);
+    launcher_feedback_seen_ = true;
+    launcher_feedback_time_ = Now();
     PublishGimbalFeedback();
   }
   void OnChassisYaw(const float& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
     chassis_imu_yaw_ = value;
+    chassis_yaw_time_ = Now();
     PublishOffline();
   }
   void OnChassisYawValid(const bool& value) {
@@ -599,6 +614,7 @@ class HostDataLink {
     LibXR::Mutex::LockGuard lock(mutex_);
     if (value <= 100U) {
       capacitor_capacity_ = value;
+      capacitor_time_ = Now();
     } else {
       capacitor_capacity_valid_ = false;
     }
@@ -614,6 +630,8 @@ class HostDataLink {
     if (!std::isfinite(value)) return;
     yawmotor_angle_ = value;
     gimbal_feedback_.yaw = value;
+    yaw_feedback_time_ = Now();
+    yaw_feedback_seen_ = true;
     gimbal_feedback_.valid_flags |= Pldx::HostDataLink::FEEDBACK_YAW_VALID;
     PublishGimbalFeedback();
     PublishOffline();
@@ -622,6 +640,8 @@ class HostDataLink {
     LibXR::Mutex::LockGuard lock(mutex_);
     if (!std::isfinite(value)) return;
     gimbal_feedback_.pitch = value;
+    pitch_feedback_time_ = Now();
+    pitch_feedback_seen_ = true;
     gimbal_feedback_.valid_flags |= Pldx::HostDataLink::FEEDBACK_PITCH_VALID;
     PublishGimbalFeedback();
   }
@@ -644,6 +664,8 @@ class HostDataLink {
   void OnGimbalMode(const uint8_t& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
     gimbal_feedback_.gimbal_mode = value;
+    mode_feedback_time_ = Now();
+    mode_feedback_seen_ = true;
     gimbal_feedback_.valid_flags |=
         Pldx::HostDataLink::FEEDBACK_GIMBAL_MODE_VALID;
     PublishGimbalFeedback();
@@ -651,26 +673,44 @@ class HostDataLink {
   void OnVisionTask(const uint8_t& value) {
     LibXR::Mutex::LockGuard lock(mutex_);
     gimbal_feedback_.vision_task = value;
+    vision_feedback_time_ = Now();
+    vision_feedback_seen_ = true;
     gimbal_feedback_.valid_flags |=
         Pldx::HostDataLink::FEEDBACK_VISION_TASK_VALID;
     PublishGimbalFeedback();
   }
   void PublishGimbalFeedback() {
     const auto NOW = Now();
+    RefreshGimbalFeedback(NOW);
+    gimbal_feedback_topic_.Publish(gimbal_feedback_);
+  }
+  bool RefreshGimbalFeedback(LibXR::MillisecondTimestamp now) {
+    const uint8_t previous = gimbal_feedback_.valid_flags;
+    uint8_t flags = 0U;
+    const auto fresh = [now](LibXR::MillisecondTimestamp seen, bool has_seen) {
+      return has_seen &&
+             (now - seen).ToMillisecond() <=
+                 Pldx::HostDataLinkDetail::FEEDBACK_FIELD_TIMEOUT_MS;
+    };
+    if (fresh(yaw_feedback_time_, yaw_feedback_seen_))
+      flags |= Pldx::HostDataLink::FEEDBACK_YAW_VALID;
+    if (fresh(pitch_feedback_time_, pitch_feedback_seen_))
+      flags |= Pldx::HostDataLink::FEEDBACK_PITCH_VALID;
+    if (fresh(mode_feedback_time_, mode_feedback_seen_))
+      flags |= Pldx::HostDataLink::FEEDBACK_GIMBAL_MODE_VALID;
+    if (fresh(vision_feedback_time_, vision_feedback_seen_))
+      flags |= Pldx::HostDataLink::FEEDBACK_VISION_TASK_VALID;
+    if (fresh(launcher_feedback_time_, launcher_feedback_seen_))
+      flags |= launcher_valid_flags_;
     if (Pldx::HostDataLinkDetail::AngularVelocityFresh(
-            NOW, yaw_omega_time_, pitch_omega_time_, yaw_omega_seen_,
+            now, yaw_omega_time_, pitch_omega_time_, yaw_omega_seen_,
             pitch_omega_seen_) &&
         std::isfinite(gimbal_feedback_.yaw_velocity) &&
         std::isfinite(gimbal_feedback_.pitch_velocity)) {
-      gimbal_feedback_.valid_flags |=
-          Pldx::HostDataLink::FEEDBACK_ANGULAR_VELOCITY_VALID;
-    } else {
-      gimbal_feedback_.valid_flags = static_cast<uint8_t>(
-          gimbal_feedback_.valid_flags &
-          static_cast<uint8_t>(
-              ~Pldx::HostDataLink::FEEDBACK_ANGULAR_VELOCITY_VALID));
+      flags |= Pldx::HostDataLink::FEEDBACK_ANGULAR_VELOCITY_VALID;
     }
-    gimbal_feedback_topic_.Publish(gimbal_feedback_);
+    gimbal_feedback_.valid_flags = flags;
+    return flags != previous;
   }
   void PublishOffline() {
     Pldx::HostDataLink::SentryInfoOffline info{};
@@ -703,16 +743,10 @@ class HostDataLink {
     return value;
   }
   void OnReferee(const Referee::RobotGameRefereePack& source) {
-    // Referee publishes raw uint32_t receive times; 0 means never received.
-    const auto NOW = Now();
-    const bool hp_fresh =
-        source.robot_hp_received_time_ms != 0U &&
-        (NOW - LibXR::MillisecondTimestamp(source.robot_hp_received_time_ms))
-                .ToMillisecond() <= 250U;
-    const bool pos_fresh =
-        source.sentry_pos_received_time_ms != 0U &&
-        (NOW - LibXR::MillisecondTimestamp(source.sentry_pos_received_time_ms))
-                .ToMillisecond() <= 250U;
+    const auto fresh = [&source](uint16_t required) {
+      return source.referee_online &&
+             (source.source_fresh_mask & required) == required;
+    };
     Pldx::HostDataLink::GameInfo game{};
     game.game_time_remaining = source.game_status.stage_remain_time;
     game.coin_remaining = source.bullet_remain.coin_remain;
@@ -721,7 +755,9 @@ class HostDataLink {
                             sizeof(game.event_code));
     game.enemy_outpost_hp = source.robot_hp.enemy_outpost_hp;
     game.enemy_base_hp = source.robot_hp.enemy_base_hp;
-    game_info_topic_.Publish(game);
+    if (fresh(Referee::SOURCE_GAME_STATUS | Referee::SOURCE_BULLET_REMAIN |
+              Referee::SOURCE_FIELD_EVENT | Referee::SOURCE_ROBOT_HP))
+      game_info_topic_.Publish(game);
 
     Pldx::HostDataLink::SentryInfoOnline online{};
     online.self_health = source.robot_status.remain_hp;
@@ -746,14 +782,17 @@ class HostDataLink {
     online.energy_ratio = source.robot_buff.percent_100_remain_energy  ? 100U
                           : source.robot_buff.percent_50_remain_energy ? 50U
                                                                        : 0U;
-    online_info_topic_.Publish(online);
+    if (fresh(Referee::SOURCE_ROBOT_STATUS | Referee::SOURCE_BULLET_REMAIN |
+              Referee::SOURCE_POWER_HEAT | Referee::SOURCE_ROBOT_POS |
+              Referee::SOURCE_SENTRY_INFO | Referee::SOURCE_ROBOT_BUFF))
+      online_info_topic_.Publish(online);
 
     const uint8_t id = source.robot_status.robot_id;
     const bool blue = id >= 101U && id <= 199U;
     const bool ids_valid = blue || (id >= 1U && id <= 99U);
-    if ((source.source_valid_mask & Referee::SOURCE_ROBOT_HP) != 0U &&
-        (source.source_valid_mask & Referee::SOURCE_SENTRY_POS) != 0U &&
-        hp_fresh && pos_fresh && ids_valid) {
+    if (fresh(Referee::SOURCE_ROBOT_HP | Referee::SOURCE_SENTRY_POS |
+              Referee::SOURCE_ROBOT_STATUS) &&
+        ids_valid) {
       Pldx::HostDataLink::TeamInfo info{};
       const uint8_t ids[4] = {static_cast<uint8_t>(blue ? 101U : 1U),
                               static_cast<uint8_t>(blue ? 102U : 2U),
@@ -773,10 +812,6 @@ class HostDataLink {
       info.base_hp = source.robot_hp.ally_base_hp;
       team_info_topic_.Publish(info);
     }
-
-    Pldx::HostDataLink::RadarInfo radar{};
-    radar.enemy_coin_left = source.bullet_remain.coin_remain;
-    radar_info_topic_.Publish(radar);
   }
   class Sink {
    public:
@@ -798,7 +833,6 @@ class HostDataLink {
     HostDataLink& owner_;
   };
   CMD* cmd_;
-  LibXR::UART* uart_;
   LibXR::Mutex mutex_;
   LibXR::Topic chassis_topic_, behavior_topic_, team_info_topic_,
       game_info_topic_, online_info_topic_, offline_info_topic_,
@@ -813,6 +847,7 @@ class HostDataLink {
   LibXR::Topic resurrection_topic_{
       LibXR::Topic::CreateTopic<bool>("sentry_buy_resurrection")};
   Pldx::HostDataLink::ChassisTarget latest_chassis_{};
+  bool chassis_submitted_online_ = false;
   float yawmotor_angle_{};
   LibXR::MillisecondTimestamp yaw_omega_time_{};
   LibXR::MillisecondTimestamp pitch_omega_time_{};
@@ -820,24 +855,29 @@ class HostDataLink {
   bool pitch_omega_seen_{};
   float chassis_imu_yaw_{};
   bool chassis_imu_yaw_valid_{};
+  LibXR::MillisecondTimestamp chassis_yaw_time_{};
   uint8_t capacitor_capacity_{};
   bool capacitor_capacity_valid_{};
+  LibXR::MillisecondTimestamp capacitor_time_{};
   bool tunnel_align_active_{};
+  LibXR::MillisecondTimestamp behavior_time_{};
   float tunnel_align_angle_rad_{};
   Pldx::HostDataLink::GimbalFeedback gimbal_feedback_{};
+  LibXR::MillisecondTimestamp yaw_feedback_time_{}, pitch_feedback_time_{};
+  LibXR::MillisecondTimestamp mode_feedback_time_{}, vision_feedback_time_{};
+  LibXR::MillisecondTimestamp launcher_feedback_time_{};
+  uint8_t launcher_valid_flags_{};
+  bool yaw_feedback_seen_{}, pitch_feedback_seen_{}, mode_feedback_seen_{};
+  bool vision_feedback_seen_{}, launcher_feedback_seen_{};
   Pldx::HostDataLinkDetail::ChassisCommandTracker tracker_;
   Pldx::HostDataLinkDetail::DecisionSequenceTracker decision_;
-#endif  // HOST_DATA_LINK_PROTOCOL_ONLY
 };
 
-#ifndef HOST_DATA_LINK_PROTOCOL_ONLY
-inline HostDataLink::HostDataLink(LibXR::UART& uart, CMD& cmd,
-                                  const char* referee_topic_name,
+inline HostDataLink::HostDataLink(CMD& cmd, const char* referee_topic_name,
                                   const char* pitch_topic_name,
                                   const char* yaw_topic_name,
                                   const char* quaternion_topic_name)
     : cmd_(&cmd),
-      uart_(&uart),
       chassis_topic_(
           LibXR::Topic::CreateTopic<Pldx::HostDataLink::ChassisTarget>(
               "nav_data")),
@@ -864,8 +904,6 @@ inline HostDataLink::HostDataLink(LibXR::UART& uart, CMD& cmd,
           "nav_chassis_mode", nullptr, false)),
       use_capacitor_topic_(
           LibXR::Topic::CreateTopic<bool>("use_capacitor", nullptr, false)) {
-  ASSERT(uart_->SetConfig({921600U, LibXR::UART::Parity::NO_PARITY, 8U, 1U}) ==
-         LibXR::ErrorCode::OK);
   RegisterRawCallback<&HostDataLink::OnChassis>(chassis_topic_);
   RegisterRawCallback<&HostDataLink::OnBehavior>(behavior_topic_);
   RegisterNamedCallback<Referee::RobotGameRefereePack,
@@ -888,9 +926,11 @@ inline HostDataLink::HostDataLink(LibXR::UART& uart, CMD& cmd,
       "chassis_capacitor_capacity");
   RegisterNamedCallback<bool, &HostDataLink::OnCapacitorValid>(
       "chassis_capacitor_valid");
+  auto timeout_timer = LibXR::Timer::CreateTask(
+      +[](HostDataLink* self) { self->CheckChassisTimeout(); }, this, 5);
+  LibXR::Timer::Add(timeout_timer);
+  LibXR::Timer::Start(timeout_timer);
   UNUSED(pitch_topic_name);
   UNUSED(yaw_topic_name);
   UNUSED(quaternion_topic_name);
 }
-
-#endif  // HOST_DATA_LINK_PROTOCOL_ONLY

@@ -6,7 +6,9 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[3]
+MODULE_ROOT = Path(__file__).resolve().parents[1]
+ROOT = next(parent for parent in MODULE_ROOT.parents
+            if (parent / 'Modules/modules.yaml').is_file())
 
 
 def main():
@@ -22,13 +24,12 @@ def main():
 
     assert modules['host_link']['module'] == 'GUET-PLDX/HostDataLink'
     assert args('host_link')['cmd'] == 'cmd'
-    assert args('host_link')['uart'] == 'usb_navigation_cdc'
+    assert 'uart' not in args('host_link')
     for module in modules.values():
         values = {key: value for arg in module.get('args', []) for key, value in arg.items()}
         if values.get('uart') == 'usb_navigation_cdc':
             assert module['module'] in {
-                'GUET-PLDX/HostDataLink', 'GUET-PLDX/SharedTopic',
-                'GUET-PLDX/SharedTopicClient',
+                'GUET-PLDX/SharedTopic', 'GUET-PLDX/SharedTopicClient',
             }
     assert args('navigation_rx')['uart'] == args('navigation_tx')['uart'] == 'usb_navigation_cdc'
     assert topics('navigation_rx') == ['nav_data', 'behavior_data']
@@ -43,7 +44,7 @@ def main():
     assert all(m['module'] != 'GUET-PLDX/HostData' for m in modules.values())
     registry = yaml.safe_load((ROOT / 'Modules/modules.yaml').read_text())['modules']
     assert 'GUET-PLDX/HostDataLink' in [r.split('@')[0] if isinstance(r, str) else r['id'] for r in registry]
-    source = (ROOT / 'Modules/HostDataLink/HostDataLink.hpp').read_text()
+    source = (MODULE_ROOT / 'HostDataLink.hpp').read_text()
     assert 'navigation_velocity' not in source
     for field in ('fx_n', 'fy_n', 'mz_nm'):
         assert f'latest_chassis_.{field}' in source
